@@ -25,6 +25,11 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | `space` | play / pause |
 | `r` | toggle the colour scale between relative and absolute |
 | `l` | toggle country labels |
+| `b` | toggle country borders |
+
+The **layers** button in the console opens palette selection (thermal, magma, viridis, mono) and
+per-layer switches for names, borders, relief and stars. Camera, month and every setting are kept in
+`localStorage`, so a reload puts you back where you were.
 
 It opens centred on Europe, at today's date. Because a monthly mean describes the middle of its
 month, "today" is a position *between* two samples — 30 August sits about half way from the August
@@ -36,6 +41,7 @@ field toward the September one, and the readout says so.
 |---|---|---|---|---|
 | Land | [WorldClim 2.1](https://www.worldclim.org/data/worldclim21.html) `tavg` 10′ | 2160 × 1080 | 1970–2000 | 2 m air temperature |
 | Ocean | [NOAA OISST v2](https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.html) long-term mean | 360 × 180 | 1991–2020 | sea surface temperature |
+
 | Borders | Natural Earth 110 m via [world-atlas](https://github.com/topojson/world-atlas) | — | — | public domain |
 
 > Fick, S.E. and R.J. Hijmans, 2017. *WorldClim 2: new 1km spatial resolution climate surfaces for
@@ -66,8 +72,13 @@ into January. That single `mix` is what makes the slider glide rather than step.
 
 **Temperature is one 8-bit channel, on purpose.** The GPU bilinear-filters this texture. A 16-bit
 value split across two channels filters *incorrectly* — interpolating a high byte across a step
-boundary produces garbage. One 8-bit channel filters correctly, at the cost of 0.39 °C of
+boundary produces garbage. One 8-bit channel filters correctly, at the cost of 0.43 °C of
 quantisation, which is invisible in a heat map. The green channel carries the land mask.
+
+**The encoded range is chosen to contain the data, not to look tidy.** −70…+40 °C brackets the
+observed −68.5…+39.6. A symmetric −50…+50 looks neater and was wrong twice over: it clipped the
+Antarctic plateau flat, and wasted the top tenth of every ramp on temperatures the Earth does not
+have. The build asserts the bounds hold rather than clamping silently.
 
 **The field is unlit.** No diffuse term touches the data. Shading a colour-mapped surface would make
 one temperature read as two different colours depending on which way it faces, quietly breaking the
@@ -78,6 +89,21 @@ the limb.
 them both as a GL lookup texture and as a CSS gradient. The renderer runs with output colour
 conversion disabled, so the authored sRGB bytes reach the framebuffer untouched and the bar under
 the globe is the same colour as the globe, not merely close to it.
+
+**Land and sea are told apart by the mask, not by an extra asset.** The land mask has always been in
+the texture's green channel; the shader now uses it to recess the ocean very slightly and to derive
+a shoreline where the filtered mask crosses 0.5, at a width held constant in screen space by
+`fwidth`. Turn country borders off and every coastline is still there. This is the one place
+brightness is modulated over a colour-mapped surface, and it earns the exception twice: the
+modulation is tied to a fixed boundary rather than to any value, and land and sea genuinely *are*
+different measurements here, so drawing the seam is honest rather than decorative.
+
+**Borders are real quads, not GL lines.** `LineBasicMaterial` cannot help: WebGL's `lineWidth` is
+capped at 1 by every desktop driver, which is why the outlines used to vanish against a bright
+surface. `LineSegments2` builds each segment as an instanced quad, so width is genuine and
+resolution-independent — and it is cheap here, because the whole world is only 11,307 segments.
+They are drawn twice, a dark wider pass under a bright narrower one, so a single line colour stays
+legible over a ramp running from near-black violet to pale gold.
 
 **The scale follows the view.** In relative mode the ramp is windowed to the hottest and coldest
 thing currently on screen, for the currently selected point in the year. Zoomed out over the whole
@@ -109,19 +135,23 @@ countries appear as they grow past the threshold instead of fighting their neigh
 Anchors come from an area-weighted centroid computed *on the sphere* — in lon/lat, Russia and Fiji
 average their two halves into the middle of the wrong ocean.
 
-**Relative mode swaps the palette, deliberately.** Absolute mode is diverging (blue-white-red) because
-0 °C is a real midpoint. A moving window has no meaningful midpoint, so it gets a *sequential* ramp
-where lightness rises monotonically and no colour makes an absolute claim — otherwise a 30 °C Sahara
-would render deep blue simply because it was the coolest thing in frame. The legend marks where 0 °C
-falls whenever it lands inside the window, which hands back the one absolute reference the
-sequential ramp gives up.
+**Diverging and sequential ramps are not interchangeable.** A diverging ramp claims its midpoint
+means something; here that is 0 °C. A sequential ramp only claims low-to-high, which is the honest
+choice for a window that floats with the view — otherwise a 30 °C Sahara renders deep blue simply
+for being the coolest thing in frame. Thermal is diverging; magma, viridis and mono are sequential.
+
+**Diverging ramps stay pinned to freezing.** Naively, white sits at the midpoint of whatever range
+is in force, which is 0 °C only by coincidence — and never, now that the encoding runs −70…+40. So
+the shader stretches each half of a diverging ramp independently about the position of 0 °C in the
+current window (`zeroSplit`). White lands on freezing whatever the window, and when the window
+doesn't straddle zero at all it degrades to a single half of the ramp, which is the right picture
+for an all-warm view. The legend bar applies the identical remap to its CSS stops, so the white band
+sits under the 0 °C tick rather than near it. Under a *sequential* palette the legend draws an
+explicit 0 °C marker instead, handing back the reference the ramp gives up.
 
 ## Caveats
 
-- **The scale bottoms out at −50 °C.** Monthly means on the Antarctic plateau reach about −68 °C and
-  are clamped; the legend marks the low end `≤ −50` rather than hiding it. About 2.15% of all pixels
-  across the year are affected, essentially all of them in Antarctica.
-- **Readings are quantised to 0.39 °C**, so the tooltip's decimal is finer than the stored value.
+- **Readings are quantised to 0.43 °C**, so the tooltip's decimal is finer than the stored value.
   Invisible at full range, but stretching a narrow relative window over the whole ramp would expose
   it as terracing, so the shader dithers by a full quantisation step using interleaved gradient
   noise. Half a step only roughens the boundary between two plateaus; a full step makes their noise
@@ -144,6 +174,7 @@ src/stars.ts            the starfield, one draw call
 src/ramp.ts             both colour ramps — single source of truth for shader and legend
 src/countries.ts        TopoJSON → border lines and label anchors, from one fetch and one parse
 src/labels.ts           country names: project, cull, declutter, place
+src/persist.ts          camera and settings in localStorage, with every access guarded
 src/ui.ts               masthead, legend, transport, tooltip
 ```
 

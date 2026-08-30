@@ -1,51 +1,68 @@
 import * as THREE from 'three';
 
 /**
- * The two temperature colour ramps — defined exactly once, consumed by both the globe shader and
- * the DOM legend. Defining them twice is how a legend silently starts lying about what it labels.
+ * The colour ramps — defined exactly once, consumed by the globe shader, the legend bar and the
+ * hover swatch. Defining them twice is how a legend silently starts lying about what it labels.
  *
- * There are two because the scale has two modes, and they are not interchangeable:
+ * Ramps come in two kinds, and the distinction is not cosmetic:
  *
- *   - **Absolute** (−50…+50 °C) has a genuinely meaningful midpoint, so it gets a *diverging* ramp
- *     with near-white pinned to 0 °C. The freezing line and the sea-ice edge then draw themselves.
- *
- *   - **Relative** windows the scale to whatever is on screen, so its midpoint is an accident of
- *     the current view. A diverging ramp there would be actively misleading: zoomed into the Sahara
- *     in July the coolest thing visible is about 30 °C, and it would render deep violet. Windowed
- *     data gets a *sequential* ramp instead, where lightness rises monotonically and no individual
- *     colour makes a claim about absolute temperature.
+ *   - **Diverging** ramps claim that their midpoint means something. Here that midpoint is 0 °C, so
+ *     the freezing line and the sea-ice edge draw themselves. A diverging ramp is only honest if
+ *     that midpoint is actually pinned to freezing — see `zeroSplit` below, which is what keeps it
+ *     pinned even when the window moves or the encoded range is asymmetric.
+ *   - **Sequential** ramps only claim low-to-high. They are the right choice whenever the scale is
+ *     windowed to the view, because a floating window has no meaningful midpoint: zoomed into the
+ *     Sahara in July the coolest thing visible is about 30 °C, and a diverging ramp would render it
+ *     deep violet.
  */
 
 export interface Stop {
-  /** Position in the normalised range, 0 = window low, 1 = window high. */
+  /**
+   * Position in the ramp's own space, 0…1.
+   *
+   * For sequential ramps this is the normalised value directly. For diverging ramps it is
+   * *canonical* space, where 0.5 is the midpoint by construction; the shader stretches each half
+   * so that 0.5 lands on 0 °C wherever that falls in the current window.
+   */
   t: number;
   hex: string;
 }
 
-/** Absolute mode. Symmetric about 0 °C, which is why white lands exactly on freezing. */
-export const DIVERGING_STOPS: readonly Stop[] = [
-  { t: 0.0, hex: '#150e2e' }, // −50 °C  deep violet
-  { t: 0.09, hex: '#242a72' }, // −41
-  { t: 0.19, hex: '#2a5bb5' }, // −31
-  { t: 0.3, hex: '#3f9ada' }, // −20
-  { t: 0.4, hex: '#8ed5ee' }, // −10
-  { t: 0.47, hex: '#d8eef7' }, //  −3
-  { t: 0.5, hex: '#f7f9f6' }, //   0 °C  freezing
-  { t: 0.53, hex: '#fdefc8' }, //  +3
-  { t: 0.6, hex: '#fbd07a' }, // +10
-  { t: 0.7, hex: '#f5a03f' }, // +20
-  { t: 0.8, hex: '#e8563a' }, // +30
-  { t: 0.9, hex: '#b81f3b' }, // +40
-  { t: 1.0, hex: '#6d0f2f' }, // +50 °C  deep crimson
+export type PaletteKind = 'diverging' | 'sequential';
+
+export interface Palette {
+  id: string;
+  label: string;
+  kind: PaletteKind;
+  stops: readonly Stop[];
+}
+
+/** Blue → white → red, the meteorological convention. White is welded to 0 °C. */
+const THERMAL: readonly Stop[] = [
+  { t: 0.0, hex: '#100a24' },
+  { t: 0.09, hex: '#1b1440' },
+  { t: 0.2, hex: '#242a72' },
+  { t: 0.31, hex: '#2a5bb5' },
+  { t: 0.4, hex: '#3f9ada' },
+  { t: 0.46, hex: '#8ed5ee' },
+  { t: 0.485, hex: '#d8eef7' },
+  { t: 0.5, hex: '#f7f9f6' }, // 0 °C
+  { t: 0.515, hex: '#fdefc8' },
+  { t: 0.56, hex: '#fbd07a' },
+  { t: 0.66, hex: '#f5a03f' },
+  { t: 0.78, hex: '#e8563a' },
+  { t: 0.9, hex: '#b81f3b' },
+  { t: 1.0, hex: '#6d0f2f' },
 ];
 
 /**
- * Relative mode. Monotonic in lightness, so it reads purely as low→high.
+ * Magma-like. Monotonic in lightness, so it reads purely as low → high.
  *
  * The dark end is a visible violet rather than near-black on purpose: against the `#07090d` page
  * the globe would otherwise lose its silhouette wherever the coldest visible region meets the limb.
+ * The same constraint applies to every sequential ramp here.
  */
-export const SEQUENTIAL_STOPS: readonly Stop[] = [
+const MAGMA: readonly Stop[] = [
   { t: 0.0, hex: '#1e1240' },
   { t: 0.12, hex: '#3a1a72' },
   { t: 0.25, hex: '#62207f' },
@@ -57,8 +74,40 @@ export const SEQUENTIAL_STOPS: readonly Stop[] = [
   { t: 1.0, hex: '#fce9ad' },
 ];
 
-const LUT_SIZE = 256;
+/** Viridis. Perceptually uniform, and the only ramp here that survives colour-blindness intact. */
+const VIRIDIS: readonly Stop[] = [
+  { t: 0.0, hex: '#3b1d5e' },
+  { t: 0.13, hex: '#472d7b' },
+  { t: 0.25, hex: '#3b528b' },
+  { t: 0.38, hex: '#2c728e' },
+  { t: 0.5, hex: '#21918c' },
+  { t: 0.63, hex: '#27ad81' },
+  { t: 0.75, hex: '#5ec962' },
+  { t: 0.88, hex: '#aadc32' },
+  { t: 1.0, hex: '#fde725' },
+];
 
+/** No hue at all — the quickest way to tell a real pattern from an artefact of the palette. */
+const MONO: readonly Stop[] = [
+  { t: 0.0, hex: '#1a1e26' },
+  { t: 0.5, hex: '#8b939e' },
+  { t: 1.0, hex: '#f4f7fa' },
+];
+
+export const PALETTES: readonly Palette[] = [
+  { id: 'thermal', label: 'thermal', kind: 'diverging', stops: THERMAL },
+  { id: 'magma', label: 'magma', kind: 'sequential', stops: MAGMA },
+  { id: 'viridis', label: 'viridis', kind: 'sequential', stops: VIRIDIS },
+  { id: 'mono', label: 'mono', kind: 'sequential', stops: MONO },
+];
+
+export const DEFAULT_PALETTE_ID = 'magma';
+
+export function paletteById(id: string): Palette {
+  return PALETTES.find((p) => p.id === id) ?? PALETTES.find((p) => p.id === DEFAULT_PALETTE_ID)!;
+}
+
+const LUT_SIZE = 256;
 type Rgb = [number, number, number];
 
 function hexToRgb(hex: string): Rgb {
@@ -66,7 +115,25 @@ function hexToRgb(hex: string): Rgb {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-/** Samples a ramp at a normalised position, interpolating between the two bracketing stops. */
+/**
+ * Maps a windowed value into a diverging ramp's canonical space, so that 0 °C always lands on the
+ * ramp's midpoint.
+ *
+ * Each half is stretched independently: everything below freezing fills [0, 0.5] and everything
+ * above fills [0.5, 1]. That keeps white on freezing whatever the window is, and it degrades
+ * sensibly when the window doesn't straddle 0 °C at all — `zero` clamps to an end and the view uses
+ * a single half of the ramp, which is the honest thing to show for an all-warm or all-cold view.
+ */
+export function zeroSplit(w: number, zero: number): number {
+  return w < zero ? (w / Math.max(zero, 1e-4)) * 0.5 : 0.5 + ((w - zero) / Math.max(1 - zero, 1e-4)) * 0.5;
+}
+
+/** Where 0 °C sits inside a window, clamped to the ramp. */
+export function zeroPosition(lo: number, hi: number): number {
+  return Math.min(Math.max((0 - lo) / (hi - lo), 0), 1);
+}
+
+/** Samples a ramp at a position in its own space. */
 export function rampAt(stops: readonly Stop[], t: number): Rgb {
   const x = Math.min(Math.max(t, 0), 1);
   let i = 0;
@@ -84,7 +151,7 @@ export function rampAt(stops: readonly Stop[], t: number): Rgb {
 }
 
 /**
- * A 256×1 lookup texture the fragment shader indexes with the windowed temperature.
+ * A 256×1 lookup texture the fragment shader indexes with the windowed value.
  *
  * `colorSpace` is left as NoColorSpace and the renderer runs with output conversion disabled, so
  * these bytes reach the framebuffer untouched. That is what makes the globe and the CSS legend
@@ -109,20 +176,26 @@ export function makeRampTexture(stops: readonly Stop[]): THREE.DataTexture {
   return tex;
 }
 
-/** A ramp as a CSS gradient, for the legend bar. */
-export function rampCss(stops: readonly Stop[], direction = 'to right'): string {
-  return `linear-gradient(${direction}, ${stops
-    .map((s) => `${s.hex} ${(s.t * 100).toFixed(1)}%`)
-    .join(', ')})`;
+/**
+ * A palette as a CSS gradient for the legend bar.
+ *
+ * A diverging ramp's stops are repositioned by the same split the shader applies, so the white band
+ * on the legend sits exactly under 0 °C — otherwise the bar would promise a midpoint the globe
+ * doesn't have.
+ */
+export function rampCss(palette: Palette, zero: number, direction = 'to right'): string {
+  const place = (t: number) => {
+    if (palette.kind !== 'diverging') return t;
+    return t < 0.5 ? t * 2 * zero : zero + (t - 0.5) * 2 * (1 - zero);
+  };
+  const parts = palette.stops.map((s) => `${s.hex} ${(place(s.t) * 100).toFixed(2)}%`);
+  return `linear-gradient(${direction}, ${parts.join(', ')})`;
 }
 
-/**
- * Colour for a normalised position, cross-faded between the two palettes exactly as the shader
- * does — so the tooltip swatch stays correct even mid-transition between modes.
- */
-export function blendedCss(w: number, blend: number): string {
-  const a = rampAt(DIVERGING_STOPS, w);
-  const b = rampAt(SEQUENTIAL_STOPS, w);
-  const c = (i: 0 | 1 | 2) => Math.round(a[i] + (b[i] - a[i]) * blend);
+/** Colour for a windowed value, cross-faded between two palettes exactly as the shader does. */
+export function blendedCss(a: Palette, b: Palette, w: number, zero: number, blend: number): string {
+  const ca = rampAt(a.stops, a.kind === 'diverging' ? zeroSplit(w, zero) : w);
+  const cb = rampAt(b.stops, b.kind === 'diverging' ? zeroSplit(w, zero) : w);
+  const c = (i: 0 | 1 | 2) => Math.round(ca[i] + (cb[i] - ca[i]) * blend);
   return `rgb(${c(0)} ${c(1)} ${c(2)})`;
 }

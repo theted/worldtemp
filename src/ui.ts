@@ -1,15 +1,15 @@
 import type { Field } from './field';
 import type { Globe } from './globe';
-import { rampCss, blendedCss, DIVERGING_STOPS, SEQUENTIAL_STOPS } from './ramp';
+import { rampCss, blendedCss, zeroPosition, PALETTES, paletteById } from './ramp';
 import { formatLonLat } from './geo';
 
 /**
- * Chrome around the globe: title, legend, scrubber, and the hover readout.
+ * Chrome around the globe: title, legend, scrubber, layers panel, and the hover readout.
  *
  * Every colour shown here comes from `ramp.ts`, the same module the shader samples, so the legend
  * is guaranteed to describe the picture rather than merely resemble it. That matters more now the
- * scale can move: with a relative window the legend's *numbers* are the only thing telling you what
- * a colour means.
+ * scale can move and the palette can change: with a relative window the legend's *numbers* are the
+ * only thing telling you what a colour means.
  */
 
 /** Seconds for playback to traverse the full year. */
@@ -51,7 +51,7 @@ function monthToDateLabel(month: number, months: number, labels: string[]): stri
  * actually in. Since a monthly mean is centred mid-month, a date in late August sits most of the
  * way from the August sample toward the September one, not at "August".
  */
-function dateToMonth(date: Date, months: number): number {
+export function dateToMonth(date: Date, months: number): number {
   const year = date.getUTCFullYear();
   const dayOfYear =
     Math.floor(
@@ -79,14 +79,23 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
+const CHIP =
+  'rounded border border-edge px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
+  'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
+const CHIP_ON = 'bg-chalk/90 text-ink';
+const CHIP_OFF = 'text-haze hover:bg-white/5';
+
+export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMonth?: number) {
   const { meta } = field;
   const months = meta.months;
 
   // ------------------------------------------------------------------------------------------
   // masthead
   // ------------------------------------------------------------------------------------------
-  const header = el('header', 'masthead pointer-events-none absolute left-0 top-0 z-10 p-6 md:p-8 select-none');
+  const header = el(
+    'header',
+    'masthead pointer-events-none absolute left-0 top-0 z-10 p-6 md:p-8 select-none',
+  );
   header.innerHTML = `
     <h1 class="text-[13px] tracking-[0.42em] text-chalk">WORLDTEMP</h1>
     <p class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>
@@ -120,7 +129,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   root.appendChild(tip);
 
   // ------------------------------------------------------------------------------------------
-  // bottom console: legend above, transport below
+  // bottom console
   // ------------------------------------------------------------------------------------------
   const console_ = el(
     'div',
@@ -128,13 +137,10 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   );
   const panel = el(
     'div',
-    'panel pointer-events-auto w-full max-w-xl rounded-lg px-5 py-4 shadow-2xl shadow-black/60',
+    'panel pointer-events-auto relative w-full max-w-xl rounded-lg px-5 py-4 shadow-2xl shadow-black/60',
   );
 
-  // legend -------------------------------------------------------------------------------------
-  const legend = el('div', 'mb-4');
-
-  // Scale-mode toggle. Relative is the default: it is what makes a zoomed-in view legible.
+  // --- scale mode + layers button ---------------------------------------------------------------
   const modes = el('div', 'flex divide-x divide-edge overflow-hidden rounded border border-edge');
   const modeBtnClass =
     'px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
@@ -145,32 +151,66 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   btnRel.type = 'button';
   modes.append(btnAbs, btnRel);
 
-  const chipClass =
-    'rounded border border-edge px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
-    'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
-  const btnLabels = el('button', chipClass, 'labels');
-  btnLabels.type = 'button';
+  const btnLayers = el('button', `${CHIP} ${CHIP_OFF}`, 'layers');
+  btnLayers.type = 'button';
+  btnLayers.setAttribute('aria-expanded', 'false');
 
   const controls = el('div', 'flex items-center gap-2');
-  controls.append(modes, btnLabels);
+  controls.append(modes, btnLayers);
 
   const legendCap = el('div', 'mb-1.5 flex items-center justify-between gap-3');
   const legendNote = el('span', 'label');
   legendCap.append(controls, legendNote);
 
+  // --- layers popover ---------------------------------------------------------------------------
+  const pop = el(
+    'div',
+    'panel absolute bottom-full left-0 mb-2 hidden w-[17.5rem] rounded-lg px-4 py-3.5 shadow-2xl shadow-black/70',
+  );
+
+  const paletteRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
+  const paletteBtns = PALETTES.map((p) => {
+    const b = el('button', `${CHIP} ${CHIP_OFF}`, p.label);
+    b.type = 'button';
+    b.addEventListener('click', () => setPalette(p.id));
+    paletteRow.appendChild(b);
+    return { id: p.id, el: b };
+  });
+
+  const showRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
+  const layerDefs = [
+    { key: 'labels', label: 'names' },
+    { key: 'borders', label: 'borders' },
+    { key: 'relief', label: 'relief' },
+    { key: 'stars', label: 'stars' },
+  ] as const;
+  const layerBtns = layerDefs.map((d) => {
+    const b = el('button', `${CHIP} ${CHIP_OFF}`, d.label);
+    b.type = 'button';
+    b.addEventListener('click', () => setLayer(d.key, !globe[d.key]));
+    showRow.appendChild(b);
+    return { key: d.key, el: b };
+  });
+
+  pop.append(
+    el('div', 'label', 'palette'),
+    paletteRow,
+    el('div', 'label mt-3.5', 'show'),
+    showRow,
+  );
+
+  // --- legend bar -------------------------------------------------------------------------------
+  const legend = el('div', 'mb-4');
   const barWrap = el(
     'div',
     'relative h-2 w-full overflow-hidden rounded-[3px] ring-1 ring-inset ring-white/10',
   );
-  const barAbs = el('div', 'absolute inset-0');
-  const barRel = el('div', 'absolute inset-0');
-  barAbs.style.background = rampCss(DIVERGING_STOPS);
-  barRel.style.background = rampCss(SEQUENTIAL_STOPS);
-  // The sequential ramp fades in over the diverging one, matching the shader's own cross-fade.
-  // `difference` blending keeps the 0 °C marker visible against both pale gold and deep violet.
+  const barFrom = el('div', 'absolute inset-0');
+  const barTo = el('div', 'absolute inset-0');
+  // `difference` blending keeps the 0 °C marker visible against every palette, light or dark.
   const zeroMark = el('div', 'absolute top-0 h-full w-px bg-white opacity-0 mix-blend-difference');
   zeroMark.title = '0 °C';
-  barWrap.append(barAbs, barRel, zeroMark);
+  barWrap.append(barFrom, barTo, zeroMark);
 
   const ticks = el('div', 'relative mt-1.5 h-3');
   const TICK_POS = [0, 0.25, 0.5, 0.75, 1];
@@ -189,7 +229,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
 
   legend.append(legendCap, barWrap, ticks);
 
-  // transport ----------------------------------------------------------------------------------
+  // --- transport --------------------------------------------------------------------------------
   const transport = el('div', 'flex items-center gap-4');
 
   const play = el(
@@ -230,7 +270,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   dateOut.append(dateBig, dateSub);
 
   transport.append(play, scrubWrap, dateOut);
-  panel.append(legend, transport);
+  panel.append(pop, legend, transport);
   console_.appendChild(panel);
   root.appendChild(console_);
 
@@ -254,27 +294,49 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     last = performance.now();
   };
 
-  const ACTIVE_MODE = 'bg-chalk/90 text-ink';
-  const IDLE_MODE = 'text-haze hover:bg-white/5';
   const setRelative = (on: boolean) => {
     globe.relative = on;
-    btnAbs.className = `${modeBtnClass} ${on ? IDLE_MODE : ACTIVE_MODE}`;
-    btnRel.className = `${modeBtnClass} ${on ? ACTIVE_MODE : IDLE_MODE}`;
+    btnAbs.className = `${modeBtnClass} ${on ? CHIP_OFF : CHIP_ON}`;
+    btnRel.className = `${modeBtnClass} ${on ? CHIP_ON : CHIP_OFF}`;
     btnAbs.setAttribute('aria-pressed', String(!on));
     btnRel.setAttribute('aria-pressed', String(on));
-    legendNote.textContent = on ? 'scaled to view' : `full range · ±${meta.quantisationC}° steps`;
+    legendNote.textContent = on ? 'scaled to view' : 'full range';
   };
 
-  const setLabels = (on: boolean) => {
-    globe.labels = on;
-    btnLabels.className = `${chipClass} ${on ? ACTIVE_MODE : IDLE_MODE}`;
-    btnLabels.setAttribute('aria-pressed', String(on));
+  function setPalette(id: string) {
+    globe.palette = id;
+    for (const b of paletteBtns) {
+      b.el.className = `${CHIP} ${b.id === id ? CHIP_ON : CHIP_OFF}`;
+      b.el.setAttribute('aria-pressed', String(b.id === id));
+    }
+  }
+
+  function setLayer(key: 'labels' | 'borders' | 'relief' | 'stars', on: boolean) {
+    globe[key] = on;
+    const b = layerBtns.find((x) => x.key === key);
+    if (b) {
+      b.el.className = `${CHIP} ${on ? CHIP_ON : CHIP_OFF}`;
+      b.el.setAttribute('aria-pressed', String(on));
+    }
+  }
+
+  const setPopOpen = (open: boolean) => {
+    pop.classList.toggle('hidden', !open);
+    btnLayers.className = `${CHIP} ${open ? CHIP_ON : CHIP_OFF}`;
+    btnLayers.setAttribute('aria-expanded', String(open));
   };
 
   play.addEventListener('click', () => setPlaying(!playing));
   btnAbs.addEventListener('click', () => setRelative(false));
   btnRel.addEventListener('click', () => setRelative(true));
-  btnLabels.addEventListener('click', () => setLabels(!globe.labels));
+  btnLayers.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setPopOpen(pop.classList.contains('hidden'));
+  });
+  pop.addEventListener('click', (e) => e.stopPropagation());
+  // Anywhere else — including the globe — dismisses it.
+  document.addEventListener('click', () => setPopOpen(false));
+
   // Grabbing the scrubber is an unambiguous request to take manual control.
   scrub.addEventListener('pointerdown', () => setPlaying(false));
   scrub.addEventListener('input', () => setMonth(Number(scrub.value) / STEPS_PER_MONTH));
@@ -287,7 +349,11 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     } else if (e.key === 'r' || e.key === 'R') {
       setRelative(!globe.relative);
     } else if (e.key === 'l' || e.key === 'L') {
-      setLabels(!globe.labels);
+      setLayer('labels', !globe.labels);
+    } else if (e.key === 'b' || e.key === 'B') {
+      setLayer('borders', !globe.borders);
+    } else if (e.key === 'Escape') {
+      setPopOpen(false);
     } else if (e.key === 'ArrowRight') {
       setPlaying(false);
       setMonth(globe.month + (e.shiftKey ? 1 : 0.25));
@@ -307,46 +373,57 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   });
 
   /**
-   * Repaints the legend from the globe's current colour window.
+   * Repaints the legend from the globe's current colour window and palette.
    *
-   * Tick text is only written when it actually changes: the window moves every frame while the
-   * camera does, and blindly assigning textContent would thrash layout sixty times a second for a
-   * label that reads the same.
+   * Both the tick text and the two gradients are rewritten only when they actually change. The
+   * window moves every frame while the camera does, and blindly reassigning a thirteen-stop
+   * gradient string sixty times a second would be pure waste.
    */
   const tickText: string[] = TICK_POS.map(() => '');
+  let lastFromId = '';
+  let lastToId = '';
+  let lastZero = -1;
+
   const paintLegend = () => {
     const { lo, hi } = globe.window;
     const blend = globe.rampBlend;
-    barRel.style.opacity = String(blend);
+    const { from, to } = globe.palettePair;
+    const zero = zeroPosition(lo, hi);
 
-    // The sequential ramp gives up "white means freezing", so hand that reference back explicitly
-    // whenever 0 °C actually falls inside the window.
-    const zeroPos = (0 - lo) / (hi - lo);
-    const showZero = blend > 0.15 && zeroPos > 0.02 && zeroPos < 0.98;
-    const zeroOpacity = showZero ? String(Math.min(1, (blend - 0.15) / 0.4)) : '0';
+    // A diverging palette's stops are repositioned by where 0 °C falls, so the bar's white band
+    // stays under freezing — which means the gradient has to be rebuilt as the window moves.
+    if (from.id !== lastFromId || to.id !== lastToId || Math.abs(zero - lastZero) > 0.004) {
+      barFrom.style.background = rampCss(from, zero);
+      barTo.style.background = rampCss(to, zero);
+      lastFromId = from.id;
+      lastToId = to.id;
+      lastZero = zero;
+    }
+    barTo.style.opacity = String(blend);
+
+    // The marker only earns its place under a sequential palette. A diverging one already puts its
+    // midpoint on freezing, so a line there would just restate what the white band says.
+    const dominant = blend > 0.5 ? to : from;
+    const showZero = dominant.kind === 'sequential' && zero > 0.02 && zero < 0.98;
+    const zeroOpacity = showZero ? '1' : '0';
     zeroMark.style.opacity = zeroOpacity;
     zeroLabel.style.opacity = zeroOpacity;
     if (showZero) {
-      zeroMark.style.left = `${zeroPos * 100}%`;
-      zeroLabel.style.left = `${zeroPos * 100}%`;
+      zeroMark.style.left = `${zero * 100}%`;
+      zeroLabel.style.left = `${zero * 100}%`;
     }
 
     for (let i = 0; i < TICK_POS.length; i++) {
       const value = lo + (hi - lo) * TICK_POS[i]!;
       const rounded = Math.round(value);
-      // Only the absolute floor is a clamp rather than a measurement, so only it gets the "≤".
-      const atFloor = i === 0 && value <= meta.tMin + 0.05;
-      const next = atFloor
-        ? `≤ ${meta.tMin}`
-        : `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded)}`;
+      const next = `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded)}`;
       if (next !== tickText[i]) {
         tickText[i] = next;
         tickEls[i]!.textContent = next;
       }
       // Yield to the 0 °C marker where they would print on top of each other — the marker carries
       // strictly more meaning than a rounded number a few degrees either side of it.
-      tickEls[i]!.style.opacity =
-        showZero && Math.abs(zeroPos - TICK_POS[i]!) < 0.07 ? '0' : '1';
+      tickEls[i]!.style.opacity = showZero && Math.abs(zero - TICK_POS[i]!) < 0.07 ? '0' : '1';
     }
   };
 
@@ -368,7 +445,14 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     // The value stays absolute — only the swatch follows the window, so it matches the surface.
     tipValue.textContent = `${celsius.toFixed(1)} °C`;
     const { lo, hi } = globe.window;
-    tipSwatch.style.background = blendedCss((celsius - lo) / (hi - lo), globe.rampBlend);
+    const { from, to } = globe.palettePair;
+    tipSwatch.style.background = blendedCss(
+      from,
+      to,
+      (celsius - lo) / (hi - lo),
+      zeroPosition(lo, hi),
+      globe.rampBlend,
+    );
     tipKind.textContent = isLand ? 'land · 2 m air' : 'ocean · sea surface';
     tipCoords.textContent = formatLonLat(h.lon, h.lat);
 
@@ -382,8 +466,9 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   };
 
   setPlaying(false);
-  setRelative(true);
-  setLabels(true);
-  setMonth(dateToMonth(new Date(), months));
+  setRelative(globe.relative);
+  setPalette(paletteById(globe.palette).id);
+  for (const d of layerDefs) setLayer(d.key, globe[d.key]);
+  setMonth(initialMonth ?? dateToMonth(new Date(), months));
   requestAnimationFrame(frame);
 }

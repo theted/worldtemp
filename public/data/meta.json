@@ -2,10 +2,10 @@
   "width": 2160,
   "height": 1080,
   "months": 12,
-  "tMin": -50,
-  "tMax": 50,
+  "tMin": -70,
+  "tMax": 40,
   "encoding": "R = (T - tMin) / (tMax - tMin) * 255; G = land mask (255 land / 0 water)",
-  "quantisationC": 0.39,
+  "quantisationC": 0.43,
   "observed": {
     "min": -68.46,
     "max": 39.55

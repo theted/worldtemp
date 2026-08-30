@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { feature } from 'topojson-client';
 import type { Topology, GeometryCollection } from 'topojson-specification';
 import type { FeatureCollection, Polygon, MultiPolygon, Position } from 'geojson';
@@ -44,9 +47,28 @@ export interface CountryAnchor {
 }
 
 export interface Countries {
-  lines: THREE.LineSegments;
+  /** Dark backing pass and the bright line itself, both sharing one geometry. */
+  lines: THREE.Group;
+  /** Must be told the drawing-buffer size; screen-space line width depends on it. */
+  setResolution(width: number, height: number): void;
   anchors: CountryAnchor[];
+  dispose(): void;
 }
+
+/**
+ * Border widths in CSS pixels.
+ *
+ * `THREE.LineBasicMaterial` cannot do this: WebGL's `lineWidth` is capped at 1 by every desktop
+ * driver, which is why the outlines were previously a hairline that disappeared against a bright
+ * surface. `LineSegments2` builds each segment as an instanced quad instead, so width is real and
+ * resolution-independent.
+ *
+ * Two passes: a dark one slightly wider than the bright one, giving every border a halo. That is
+ * what lets a single line colour stay legible over a ramp that runs from near-black violet to pale
+ * gold — the same trick the country labels use.
+ */
+const LINE_WIDTH = 1.3;
+const HALO_WIDTH = 3.4;
 
 // -----------------------------------------------------------------------------------------------
 // outlines
@@ -167,18 +189,42 @@ export async function loadCountries(base = import.meta.env.BASE_URL): Promise<Co
     }
   }
 
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const geometry = new LineSegmentsGeometry();
+  geometry.setPositions(positions);
 
-  const material = new THREE.LineBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.3,
-    depthWrite: false, // depth *test* stays on, so the far hemisphere's borders hide behind the globe
-  });
+  const make = (color: number, linewidth: number, opacity: number, order: number) => {
+    const material = new LineMaterial({
+      color,
+      linewidth,
+      opacity,
+      transparent: true,
+      // depth *test* stays on, so the far hemisphere's borders stay hidden behind the globe
+      depthWrite: false,
+    });
+    const mesh = new LineSegments2(geometry, material);
+    mesh.renderOrder = order;
+    // The geometry is a full sphere shell; three's computed bounds would cull it at high zoom.
+    mesh.frustumCulled = false;
+    return mesh;
+  };
 
-  const lines = new THREE.LineSegments(geometry, material);
-  lines.renderOrder = 1;
+  const halo = make(0x05070c, HALO_WIDTH, 0.45, 1);
+  const line = make(0xffffff, LINE_WIDTH, 0.62, 2);
 
-  return { lines, anchors };
+  const lines = new THREE.Group();
+  lines.add(halo, line);
+
+  return {
+    lines,
+    anchors,
+    setResolution: (width, height) => {
+      (halo.material as LineMaterial).resolution.set(width, height);
+      (line.material as LineMaterial).resolution.set(width, height);
+    },
+    dispose: () => {
+      geometry.dispose();
+      (halo.material as LineMaterial).dispose();
+      (line.material as LineMaterial).dispose();
+    },
+  };
 }

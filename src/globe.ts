@@ -1,23 +1,25 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { Field } from './field';
-import { makeRampTexture, DIVERGING_STOPS, SEQUENTIAL_STOPS } from './ramp';
-import { loadCountries } from './countries';
+import {
+  makeRampTexture,
+  paletteById,
+  zeroPosition,
+  DEFAULT_PALETTE_ID,
+  type Palette,
+} from './ramp';
+import { loadCountries, type Countries } from './countries';
 import { createLabels, type Labels } from './labels';
 import { createStars } from './stars';
 import { createExposure, type TempWindow } from './exposure';
 import { lonLatToVec3, uvToLonLat } from './geo';
 
 /**
- * The globe itself: an unlit, colour-mapped sphere, a border overlay, and a starfield behind it.
+ * The globe itself: an unlit, colour-mapped sphere, country outlines, names, and a starfield.
  *
- * Two things are continuous rather than discrete here, and both matter to how it feels:
- *
- *   - **The month.** The shader reads the two bracketing monthly layers and mixes them, which is
- *     what lets the slider glide through the year instead of stepping twelve times.
- *   - **The scale mode.** Absolute and relative are the ends of a single eased parameter that drives
- *     the colour window *and* the ramp cross-fade together, so switching reads as one smooth move
- *     rather than a jump cut.
+ * Three things here are continuous rather than discrete, and all three matter to how it feels: the
+ * month, the colour window, and the palette. Each is an eased parameter rather than a switch, so
+ * scrubbing, zooming and changing palette all read as movement rather than as jump cuts.
  */
 
 const VERTEX = /* glsl */ `
@@ -39,14 +41,18 @@ const FRAGMENT = /* glsl */ `
   precision highp sampler2DArray;
 
   uniform sampler2DArray uField;
-  uniform sampler2D uRampAbs;
-  uniform sampler2D uRampRel;
+  uniform sampler2D uRampA;
+  uniform sampler2D uRampB;
   uniform float uRampBlend;
+  uniform float uDivergingA;
+  uniform float uDivergingB;
+  uniform float uZero;
   uniform float uMonth;
   uniform float uMonths;
   uniform float uLo;
   uniform float uHi;
   uniform float uDither;
+  uniform float uRelief;
   uniform float uRim;
 
   varying vec2 vUv;
@@ -64,6 +70,15 @@ const FRAGMENT = /* glsl */ `
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
   }
 
+  // Stretches each side of a diverging ramp independently so its midpoint lands on 0 C wherever
+  // that falls in the current window. Without this, "white means freezing" would only be true when
+  // the window happened to be symmetric about zero.
+  float zeroSplit(float w) {
+    return w < uZero
+      ? (w / max(uZero, 1e-4)) * 0.5
+      : 0.5 + ((w - uZero) / max(1.0 - uZero, 1e-4)) * 0.5;
+  }
+
   void main() {
     // The data's first row is 90 N, while the sphere's v = 0 is the south pole, so v is flipped
     // here rather than by reordering the array - the CPU sampler in field.ts stays north-first.
@@ -75,14 +90,15 @@ const FRAGMENT = /* glsl */ `
     float i1 = mod(i0 + 1.0, uMonths);
     float f = fract(m);
 
-    float a = texture(uField, vec3(uvT, i0)).r;
-    float b = texture(uField, vec3(uvT, i1)).r;
-    float t = mix(a, b, f);
+    vec2 sa = texture(uField, vec3(uvT, i0)).rg;
+    vec2 sb = texture(uField, vec3(uvT, i1)).rg;
+    float t = mix(sa.r, sb.r, f);
+    float land = mix(sa.g, sb.g, f);
 
-    // Dither. Temperature is stored as one 8-bit channel, which is invisible across the full
-    // -50..50 range but becomes visible terracing once a narrow window is stretched over the whole
-    // ramp: the field is smooth and slowly varying, so wide runs of neighbouring texels share a
-    // byte and bilinear filtering has nothing to interpolate between.
+    // Dither. Temperature is stored as one 8-bit channel, which is invisible across the full range
+    // but becomes visible terracing once a narrow window is stretched over the whole ramp: the
+    // field is smooth and slowly varying, so wide runs of neighbouring texels share a byte and
+    // bilinear filtering has nothing to interpolate between.
     //
     // The amplitude is a full quantisation step, not half of one. Half a step only roughens the
     // boundary between two plateaus; a full step makes adjacent plateaus' noise overlap, which is
@@ -92,12 +108,34 @@ const FRAGMENT = /* glsl */ `
     // Window the value. Absolute mode is simply uLo = 0, uHi = 1, so there is no branch and no
     // second code path to keep in sync.
     float w = clamp((t - uLo) / max(uHi - uLo, 1e-4), 0.0, 1.0);
+    float wSplit = zeroSplit(w);
 
     vec3 col = mix(
-      texture(uRampAbs, vec2(w, 0.5)).rgb,
-      texture(uRampRel, vec2(w, 0.5)).rgb,
+      texture(uRampA, vec2(mix(w, wSplit, uDivergingA), 0.5)).rgb,
+      texture(uRampB, vec2(mix(w, wSplit, uDivergingB), 0.5)).rgb,
       uRampBlend
     );
+
+    // --- land/sea relief -------------------------------------------------------------------
+    // The land mask is bilinear-filtered like everything else, so it crosses 0.5 exactly at the
+    // coastline and its screen-space gradient gives a constant-width shoreline at any zoom.
+    //
+    // This does modulate brightness over a colour-mapped field, which the unlit rule otherwise
+    // forbids. It earns the exception on two counts: the modulation is tied to a fixed boundary
+    // rather than to any value, and land and sea genuinely *are* different measurements here -- 2 m
+    // air temperature against sea surface temperature -- so drawing the seam is honest rather than
+    // decorative. It is also toggleable.
+    float coastWidth = fwidth(land) * 1.6 + 1e-5;
+    float coast = 1.0 - smoothstep(0.0, coastWidth, abs(land - 0.5));
+
+    // Ocean sits very slightly recessed, so the eye reads land as the raised surface.
+    col *= mix(1.0 - 0.06 * uRelief, 1.0, land);
+
+    // A contrast-inverting shoreline: darkens where the ground is bright, lightens where it is
+    // dark. A single fixed colour would disappear at one end of every ramp.
+    float luma = dot(col, vec3(0.299, 0.587, 0.114));
+    vec3 edge = mix(col + vec3(0.20), col * 0.62, step(0.5, luma));
+    col = mix(col, edge, coast * 0.85 * uRelief);
 
     // Deliberately no diffuse term. Shading a colour-mapped surface would make one temperature
     // read as two different colours depending on which way it faces, quietly breaking the promise
@@ -110,10 +148,10 @@ const FRAGMENT = /* glsl */ `
   }
 `;
 
-/** Seconds for a mode switch to cross-fade. */
+/** Seconds for a mode or palette change to cross-fade. */
 const MODE_TAU = 0.3;
 
-/** Where the globe is facing on load: central Europe, tilted far enough south to keep the Med in. */
+/** Where the globe is facing on a first visit: central Europe, tilted to keep the Med in frame. */
 const OPENING_LON = 15;
 const OPENING_LAT = 45;
 
@@ -128,20 +166,44 @@ const OPENING_FILL = 0.92;
 export interface Globe {
   /** Continuous position in the year, 0 = mid-January, wrapping at 12. */
   month: number;
-  /** Whether the colour scale follows what is on screen (true) or stays pinned to −50…+50 °C. */
+  /** Whether the colour scale follows what is on screen, or stays pinned to the full range. */
   relative: boolean;
-  /** Whether country names are drawn over the globe. */
+  /** Active palette id; changes cross-fade. */
+  palette: string;
   labels: boolean;
+  borders: boolean;
+  /** Land/sea relief and the derived coastline. */
+  relief: boolean;
+  stars: boolean;
   /** The colour window currently in force, in °C — what the legend must label. */
   readonly window: TempWindow;
-  /** Eased 0→1 between absolute and relative, so the legend can cross-fade in step. */
+  /** Eased 0→1 across a palette change, so the legend can cross-fade in step. */
   readonly rampBlend: number;
+  /** The two palettes currently being cross-faded between. */
+  readonly palettePair: { from: Palette; to: Palette };
   /** Latest cursor position on the globe, or null when the pointer is off it. */
   readonly hover: { lon: number; lat: number } | null;
+  /** Camera position, for persistence. */
+  readonly cameraPosition: THREE.Vector3;
   dispose(): void;
 }
 
-export function createGlobe(container: HTMLElement, field: Field): Globe {
+export interface GlobeOptions {
+  /** Restored camera position; when given, the opening framing is skipped. */
+  camera?: [number, number, number] | undefined;
+  relative?: boolean | undefined;
+  palette?: string | undefined;
+  labels?: boolean | undefined;
+  borders?: boolean | undefined;
+  relief?: boolean | undefined;
+  stars?: boolean | undefined;
+}
+
+export function createGlobe(
+  container: HTMLElement,
+  field: Field,
+  options: GlobeOptions = {},
+): Globe {
   const { tMin, tMax } = field.meta;
   const scene = new THREE.Scene();
 
@@ -157,9 +219,14 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   container.appendChild(renderer.domElement);
 
   const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 200);
-  // Opens looking down on central Europe. Only the direction matters here; frameGlobe sets the
-  // distance once the viewport size is known.
-  lonLatToVec3(OPENING_LON, OPENING_LAT, 1, camera.position);
+  let framed = false;
+  if (options.camera) {
+    camera.position.fromArray(options.camera);
+    framed = true; // a restored view is the user's, not ours to re-fit
+  } else {
+    // Only the direction matters here; frameGlobe sets the distance once the viewport is known.
+    lonLatToVec3(OPENING_LON, OPENING_LAT, 1, camera.position);
+  }
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -170,19 +237,34 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   controls.maxDistance = 6;
   controls.zoomSpeed = 0.7;
 
-  const rampAbs = makeRampTexture(DIVERGING_STOPS);
-  const rampRel = makeRampTexture(SEQUENTIAL_STOPS);
+  // Palette textures are built once and kept; switching is a cross-fade between two of them.
+  const rampTextures = new Map<string, THREE.DataTexture>();
+  const rampFor = (p: Palette) => {
+    let tex = rampTextures.get(p.id);
+    if (!tex) {
+      tex = makeRampTexture(p.stops);
+      rampTextures.set(p.id, tex);
+    }
+    return tex;
+  };
+
+  let paletteFrom = paletteById(options.palette ?? DEFAULT_PALETTE_ID);
+  let paletteTo = paletteFrom;
 
   const uniforms = {
     uField: { value: field.texture },
-    uRampAbs: { value: rampAbs },
-    uRampRel: { value: rampRel },
+    uRampA: { value: rampFor(paletteFrom) },
+    uRampB: { value: rampFor(paletteTo) },
     uRampBlend: { value: 1 },
+    uDivergingA: { value: paletteFrom.kind === 'diverging' ? 1 : 0 },
+    uDivergingB: { value: paletteTo.kind === 'diverging' ? 1 : 0 },
+    uZero: { value: zeroPosition(tMin, tMax) },
     uMonth: { value: 0 },
     uMonths: { value: field.meta.months },
     uLo: { value: 0 },
     uHi: { value: 1 },
     uDither: { value: 2 / 255 }, // full quantisation step, peak-to-peak
+    uRelief: { value: options.relief === false ? 0 : 1 },
     uRim: { value: 1 },
   };
 
@@ -202,13 +284,14 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   stars.setPixelRatio(pixelRatio);
   scene.add(stars.points);
 
-  let borders: THREE.LineSegments | null = null;
+  let countries: Countries | null = null;
   let labels: Labels | null = null;
   loadCountries()
-    .then((countries) => {
-      borders = countries.lines;
-      scene.add(countries.lines);
-      labels = createLabels(container, countries.anchors);
+    .then((loaded) => {
+      countries = loaded;
+      loaded.setResolution(viewW * pixelRatio, viewH * pixelRatio);
+      scene.add(loaded.lines);
+      labels = createLabels(container, loaded.anchors);
     })
     .catch((err) => console.error('country layer failed to load', err));
 
@@ -237,6 +320,9 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   // ---------------------------------------------------------------------------------------------
   // resize + loop
   // ---------------------------------------------------------------------------------------------
+  let viewW = 1;
+  let viewH = 1;
+
   /**
    * Pulls the camera back until the globe fits whichever axis is tighter.
    *
@@ -244,9 +330,6 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
    * solves for the distance at which a unit sphere subtends the narrower field of view, times a
    * margin that leaves the poles clear of the console below.
    */
-  let framed = false;
-  let viewW = 1;
-  let viewH = 1;
   const frameGlobe = () => {
     const fovV = THREE.MathUtils.degToRad(camera.fov);
     const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
@@ -262,7 +345,8 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    // Only on first layout — after that the distance belongs to the user's zoom.
+    // Screen-space line width needs drawing-buffer pixels, not CSS pixels.
+    countries?.setResolution(w * pixelRatio, h * pixelRatio);
     if (!framed) {
       frameGlobe();
       framed = true;
@@ -275,21 +359,32 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   let raf = 0;
   let last = performance.now();
   let elapsed = 0;
-  let blend = 1; // eased mode parameter: 0 = absolute, 1 = relative
+  let modeBlend = options.relative === false ? 0 : 1; // eased: 0 = absolute, 1 = relative
+  let paletteBlend = 1; // eased 0→1 from paletteFrom to paletteTo
   const shown: TempWindow = { lo: tMin, hi: tMax };
 
   const api: Globe = {
     month: 0,
-    relative: true,
-    labels: true,
+    relative: options.relative ?? true,
+    palette: paletteTo.id,
+    labels: options.labels ?? true,
+    borders: options.borders ?? true,
+    relief: options.relief ?? true,
+    stars: options.stars ?? true,
     get window() {
       return shown;
     },
     get rampBlend() {
-      return blend;
+      return paletteBlend;
+    },
+    get palettePair() {
+      return { from: paletteFrom, to: paletteTo };
     },
     get hover() {
       return hover;
+    },
+    get cameraPosition() {
+      return camera.position;
     },
     dispose() {
       cancelAnimationFrame(raf);
@@ -299,12 +394,10 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
       controls.dispose();
       sphere.geometry.dispose();
       material.dispose();
-      rampAbs.dispose();
-      rampRel.dispose();
+      for (const tex of rampTextures.values()) tex.dispose();
       stars.dispose();
       labels?.dispose();
-      borders?.geometry.dispose();
-      (borders?.material as THREE.Material | undefined)?.dispose();
+      countries?.dispose();
       renderer.dispose();
       renderer.domElement.remove();
     },
@@ -317,20 +410,36 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
     const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
     elapsed += dt;
+    const ease = 1 - Math.exp(-dt / MODE_TAU);
+
+    // Palette changes start a fresh cross-fade from whatever is currently on screen.
+    if (api.palette !== paletteTo.id) {
+      paletteFrom = paletteBlend >= 1 ? paletteTo : paletteFrom;
+      paletteTo = paletteById(api.palette);
+      uniforms.uRampA.value = rampFor(paletteFrom);
+      uniforms.uRampB.value = rampFor(paletteTo);
+      uniforms.uDivergingA.value = paletteFrom.kind === 'diverging' ? 1 : 0;
+      uniforms.uDivergingB.value = paletteTo.kind === 'diverging' ? 1 : 0;
+      paletteBlend = 0;
+    }
+    paletteBlend = Math.min(1, paletteBlend + ease * (1 - paletteBlend) + dt * 0.35);
+    uniforms.uRampBlend.value = paletteBlend;
 
     uniforms.uMonth.value = api.month;
+    uniforms.uRelief.value += ((api.relief ? 1 : 0) - uniforms.uRelief.value) * ease;
+    stars.points.visible = api.stars;
     stars.update(elapsed);
+    if (countries) countries.lines.visible = api.borders;
     controls.update();
 
-    const wantRelative = api.relative ? 1 : 0;
-    blend += (wantRelative - blend) * (1 - Math.exp(-dt / MODE_TAU));
+    modeBlend += ((api.relative ? 1 : 0) - modeBlend) * ease;
 
     // Skip the measurement only when relative mode is both off and fully faded out; keeping it
     // running the instant the toggle flips means the window is already converging as it fades in.
-    if (blend > 0.001 || api.relative) {
+    if (modeBlend > 0.001 || api.relative) {
       const measured = exposure.update(camera, api.month, dt);
-      shown.lo = tMin + (measured.lo - tMin) * blend;
-      shown.hi = tMax + (measured.hi - tMax) * blend;
+      shown.lo = tMin + (measured.lo - tMin) * modeBlend;
+      shown.hi = tMax + (measured.hi - tMax) * modeBlend;
     } else {
       shown.lo = tMin;
       shown.hi = tMax;
@@ -338,7 +447,7 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
 
     uniforms.uLo.value = (shown.lo - tMin) / (tMax - tMin);
     uniforms.uHi.value = (shown.hi - tMin) / (tMax - tMin);
-    uniforms.uRampBlend.value = blend;
+    uniforms.uZero.value = zeroPosition(shown.lo, shown.hi);
 
     labels?.update(camera, viewW, viewH, api.labels);
 

@@ -32,9 +32,16 @@ const W = 2160;
 const H = 1080;
 const MONTHS = 12;
 
-/** Encoding range. Antarctic plateau means fall below this and are clamped; the legend says so. */
-const T_MIN = -50;
-const T_MAX = 50;
+/**
+ * Encoding range, chosen to contain the data rather than to look tidy.
+ *
+ * A symmetric -50..50 clipped the Antarctic plateau (whose July means reach about -68 C) and wasted
+ * the top tenth of the scale, since nowhere on Earth has a monthly mean near +50 C. These bounds
+ * bracket the observed -68.5..39.6 with a little headroom, so nothing is clamped and the full ramp
+ * is used. The build asserts this rather than trusting it -- see the range check below.
+ */
+const T_MIN = -70;
+const T_MAX = 40;
 
 /** OPeNDAP writes -9.96921e36 for absent cells; anything this large in magnitude is a sentinel. */
 const SENTINEL = 1e30;
@@ -226,7 +233,6 @@ async function main() {
   const fields: { temp: Float32Array; land: Uint8Array }[] = [];
   let globalMin = Infinity;
   let globalMax = -Infinity;
-  let clampedLow = 0;
 
   for (let m = 0; m < MONTHS; m++) {
     const wcM = wc[m]!;
@@ -323,7 +329,6 @@ async function main() {
       const t = temp[i]!;
       if (t < globalMin) globalMin = t;
       if (t > globalMax) globalMax = t;
-      if (t < T_MIN) clampedLow++;
     }
     fields.push({ temp, land });
     process.stdout.write(`  month ${String(m + 1).padStart(2, '0')} ok\r`);
@@ -335,7 +340,15 @@ async function main() {
     `  tiers: worldclim ${pct(tally.land)}  oisst ${pct(tally.ocean)}  dilated ${tally.dilated} px`,
   );
   console.log(`  observed range ${globalMin.toFixed(2)}..${globalMax.toFixed(2)} degC`);
-  console.log(`  clamped below ${T_MIN}: ${pct(clampedLow)} (Antarctic plateau)`);
+  // Silent clamping is the kind of thing nobody notices until a whole continent reads as one flat
+  // colour, so fail loudly instead and make widening the constants a deliberate act.
+  if (globalMin < T_MIN || globalMax > T_MAX) {
+    throw new Error(
+      `data spans ${globalMin.toFixed(2)}..${globalMax.toFixed(2)} but the encoding covers ` +
+        `${T_MIN}..${T_MAX} - widen T_MIN/T_MAX rather than clamping`,
+    );
+  }
+  console.log(`  encoding ${T_MIN}..${T_MAX} degC, step ${((T_MAX - T_MIN) / 255).toFixed(3)} - nothing clamped`);
 
   // -------------------------------------------------------------------------------------------
   // encode
@@ -409,7 +422,7 @@ async function main() {
     ['Sahara, July', 2, 25, 6, 30, 42],
     ['Amazon, July', -60, -3, 6, 22, 30],
     ['Siberia (Yakutsk), Jan', 129.7, 62, 0, -50, -30],
-    ['South Pole, July', 0, -89, 6, -70, -50], // encoding floors this at -50
+    ['South Pole, July', 0, -89, 6, -70, -50],
     ['mid Atlantic 20N, Jan', -30, 20, 0, 18, 26],
     ['equatorial Pacific, Jan', -140, 0, 0, 22, 30],
     ['North Sea, Jan', 3, 56, 0, 2, 10],

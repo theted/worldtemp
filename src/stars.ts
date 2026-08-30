@@ -3,10 +3,10 @@ import * as THREE from 'three';
 /**
  * A sparse starfield behind the globe. One draw call, ~1800 points.
  *
- * This sits behind a data visualisation, so it is deliberately restrained: most stars are dim, the
- * twinkle amplitude is low, and there is no motion fast enough to catch the eye while you are
- * reading the surface. It exists to stop the background reading as flat black and to give the limb
- * something to sit against.
+ * This sits behind a data visualisation, so the twinkle amplitude stays low and there is no motion
+ * fast enough to catch the eye while you are reading the surface. Brightness is skewed toward the
+ * dim end rather than flattened, so a handful of stars stand out and the rest recede — a uniformly
+ * bright field reads as noise, not as sky.
  */
 
 const VERTEX = /* glsl */ `
@@ -41,7 +41,7 @@ const FRAGMENT = /* glsl */ `
   void main() {
     // Round the square point sprite off, with a soft edge so stars don't alias into pixels.
     float d = length(gl_PointCoord - 0.5);
-    float alpha = smoothstep(0.5, 0.08, d);
+    float alpha = smoothstep(0.5, 0.06, d);
     if (alpha <= 0.001) discard;
 
     float twinkle = 0.86 + 0.14 * sin(uTime * 0.6 + vPhase);
@@ -57,7 +57,7 @@ export interface Stars {
   dispose(): void;
 }
 
-export function createStars(count = 1800, radius = 60): Stars {
+export function createStars(count = 2600, radius = 60): Stars {
   const position = new Float32Array(count * 3);
   const color = new Float32Array(count * 3);
   const size = new Float32Array(count);
@@ -77,14 +77,15 @@ export function createStars(count = 1800, radius = 60): Stars {
     position[i * 3 + 1] = radius * z;
     position[i * 3 + 2] = radius * r * Math.sin(theta);
 
-    // Skew brightness hard toward the dim end, so a handful of stars stand out and the rest recede.
-    const brightness = 0.22 + 0.78 * Math.pow(Math.random(), 2.2);
+    // Skewed toward the dim end, but with a floor high enough that the faintest stars still read
+    // against the page rather than vanishing into it.
+    const brightness = 0.42 + 0.58 * Math.pow(Math.random(), 1.7);
     const tint = Math.random();
     for (let c = 0; c < 3; c++) {
       color[i * 3 + c] = (COOL[c]! + (WARM[c]! - COOL[c]!) * tint) * brightness;
     }
 
-    size[i] = Math.random() < 0.06 ? 2.0 + Math.random() : 1.0 + Math.random() * 0.8;
+    size[i] = Math.random() < 0.1 ? 2.4 + Math.random() * 1.2 : 1.3 + Math.random() * 0.9;
     phase[i] = Math.random() * Math.PI * 2;
   }
 
