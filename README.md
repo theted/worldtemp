@@ -23,6 +23,7 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | hover | read the temperature under the cursor |
 | slider / `←` `→` | scrub the year (hold `shift` for whole months) |
 | `space` | play / pause |
+| `r` | toggle the colour scale between relative and absolute |
 
 ## Data
 
@@ -73,12 +74,42 @@ them both as a GL lookup texture and as a CSS gradient. The renderer runs with o
 conversion disabled, so the authored sRGB bytes reach the framebuffer untouched and the bar under
 the globe is the same colour as the globe, not merely close to it.
 
+**The scale follows the view.** In relative mode the ramp is windowed to the hottest and coldest
+thing currently on screen, for the currently selected point in the year. Zoomed out over the whole
+globe that barely matters; zoomed into the Sahara in July it is the difference between flat orange
+and being able to see the Ahaggar massif, the Sahel gradient and the Canary upwelling.
+
+[`src/exposure.ts`](src/exposure.ts) measures this by casting a fixed 48 × 28 grid of rays *through
+the screen* rather than walking the data grid over the visible region. That choice is the whole
+trick: screen-space sampling costs the same at every zoom level, where data-space iteration explodes
+to a million texels exactly when you zoom out. It also inherits the frustum, the aspect ratio and
+back-face occlusion for free, because it literally is the screen.
+
+Three guards keep it from looking terrible, and each fixes something that genuinely went wrong
+first: percentile clipping so one stray sample can't seize the scale, exponential smoothing so the
+window settles like a camera's auto-exposure instead of strobing, and a minimum span so uniform
+ocean doesn't get amplified into noise.
+
+**Relative mode swaps the palette, deliberately.** Absolute mode is diverging (blue-white-red) because
+0 °C is a real midpoint. A moving window has no meaningful midpoint, so it gets a *sequential* ramp
+where lightness rises monotonically and no colour makes an absolute claim — otherwise a 30 °C Sahara
+would render deep blue simply because it was the coolest thing in frame. The legend marks where 0 °C
+falls whenever it lands inside the window, which hands back the one absolute reference the
+sequential ramp gives up.
+
 ## Caveats
 
 - **The scale bottoms out at −50 °C.** Monthly means on the Antarctic plateau reach about −68 °C and
   are clamped; the legend marks the low end `≤ −50` rather than hiding it. About 2.15% of all pixels
   across the year are affected, essentially all of them in Antarctica.
 - **Readings are quantised to 0.39 °C**, so the tooltip's decimal is finer than the stored value.
+  Invisible at full range, but stretching a narrow relative window over the whole ramp would expose
+  it as terracing, so the shader dithers by a full quantisation step using interleaved gradient
+  noise. Half a step only roughens the boundary between two plateaus; a full step makes their noise
+  overlap, which is what actually lets the eye read a continuous gradient again.
+- **In relative mode a colour is not comparable between views** — that is what "relative" means. The
+  ramp change, the live numeric ticks and the 0 °C marker are all there to keep that legible; switch
+  to absolute (`r`) whenever you need two views to mean the same thing.
 - **This is climatology, not weather** — a 30-year average for each month, not any particular year.
 - Requires WebGL 2 (`sampler2DArray`). The field texture is ~56 MB of VRAM.
 
@@ -88,8 +119,10 @@ the globe is the same colour as the globe, not merely close to it.
 scripts/build-data.ts   fetch → composite → encode; asserts no holes, then spot-checks georeferencing
 src/field.ts            decodes the PNGs once, feeding both the GPU texture and the hover sampler
 src/geo.ts              the sphere/raster convention, in one place
+src/exposure.ts         auto-exposure: what is the hottest and coldest thing on screen right now
 src/globe.ts            scene, shader, camera framing, raycast hover
-src/ramp.ts             colour ramp — single source of truth for shader and legend
+src/stars.ts            the starfield, one draw call
+src/ramp.ts             both colour ramps — single source of truth for shader and legend
 src/borders.ts          TopoJSON → great-circle-subdivided line segments
 src/ui.ts               masthead, legend, transport, tooltip
 ```

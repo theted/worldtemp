@@ -31,6 +31,14 @@ export interface Field {
   texture: THREE.DataArrayTexture;
   /** Bilinear sample at a geographic point, blended across the continuous month. */
   sampleAt(lon: number, lat: number, month: number): Reading;
+  /**
+   * The raw encoded temperature byte (0–255), nearest-neighbour, blended across the month.
+   *
+   * Feeds the auto-exposure histogram. Nearest rather than bilinear because it is both cheaper and
+   * the more honest input to a histogram — interpolation would invent values that aren't in the
+   * data and smear the extremes the window is trying to find.
+   */
+  sampleByte(lon: number, lat: number, month: number): number;
 }
 
 async function decodeLayer(url: string, w: number, h: number): Promise<Uint8ClampedArray> {
@@ -131,5 +139,23 @@ export async function loadField(base = import.meta.env.BASE_URL): Promise<Field>
     };
   };
 
-  return { meta, texture, sampleAt };
+  /** Nearest-neighbour byte read from one month layer. */
+  const byteAt = (m: number, fx: number, fy: number): number => {
+    const x = ((Math.round(fx) % W) + W) % W;
+    const y = Math.min(Math.max(Math.round(fy), 0), H - 1);
+    return packed[(m * W * H + y * W + x) * 2]!;
+  };
+
+  const sampleByte = (lon: number, lat: number, month: number): number => {
+    const fx = ((lon + 180) / 360) * W - 0.5;
+    const fy = ((90 - lat) / 180) * H - 0.5;
+    const m = ((month % M) + M) % M;
+    const m0 = Math.floor(m);
+    const m1 = (m0 + 1) % M;
+    const f = m - m0;
+    const a = byteAt(m0, fx, fy);
+    return a + (byteAt(m1, fx, fy) - a) * f;
+  };
+
+  return { meta, texture, sampleAt, sampleByte };
 }

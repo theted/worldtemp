@@ -25,14 +25,35 @@ export function lonLatToVec3(lon: number, lat: number, radius: number, out = new
   return out.set(-radius * Math.cos(phi) * s, radius * Math.cos(theta), radius * Math.sin(phi) * s);
 }
 
+export interface LonLat {
+  lon: number;
+  lat: number;
+}
+
 /**
  * Sphere UV back to geographic coordinates.
  *
  * Raycasting hands us `intersection.uv` directly, so the hover readout inverts the same
  * parameterisation the shader samples rather than re-deriving anything from the 3-D position.
  */
-export function uvToLonLat(u: number, v: number): { lon: number; lat: number } {
+export function uvToLonLat(u: number, v: number): LonLat {
   return { lon: u * 360 - 180, lat: v * 180 - 90 };
+}
+
+/**
+ * A point on the unit sphere back to geographic coordinates — the exact inverse of
+ * `lonLatToVec3`.
+ *
+ * Used by the auto-exposure sampler, which intersects rays with the sphere analytically and so has
+ * a position rather than a UV. Writes into `out` because it runs a thousand-odd times per frame and
+ * allocating that many short-lived objects would hand the collector needless work.
+ */
+export function vec3ToLonLat(p: THREE.Vector3, out: LonLat = { lon: 0, lat: 0 }): LonLat {
+  out.lat = 90 - (Math.acos(Math.min(Math.max(p.y, -1), 1)) * 180) / Math.PI;
+  let phi = Math.atan2(p.z, -p.x);
+  if (phi < 0) phi += Math.PI * 2;
+  out.lon = (phi * 180) / Math.PI - 180;
+  return out;
 }
 
 /** Formats a coordinate the way an atlas would: 59.3° N, 18.1° E. */

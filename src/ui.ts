@@ -1,13 +1,15 @@
 import type { Field } from './field';
 import type { Globe } from './globe';
-import { rampCss, cssForTemp } from './ramp';
+import { rampCss, blendedCss, DIVERGING_STOPS, SEQUENTIAL_STOPS } from './ramp';
 import { formatLonLat } from './geo';
 
 /**
  * Chrome around the globe: title, legend, scrubber, and the hover readout.
  *
  * Every colour shown here comes from `ramp.ts`, the same module the shader samples, so the legend
- * is guaranteed to describe the picture rather than merely resemble it.
+ * is guaranteed to describe the picture rather than merely resemble it. That matters more now the
+ * scale can move: with a relative window the legend's *numbers* are the only thing telling you what
+ * a colour means.
  */
 
 /** Seconds for playback to traverse the full year. */
@@ -107,26 +109,52 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
 
   // legend -------------------------------------------------------------------------------------
   const legend = el('div', 'mb-4');
-  const bar = el('div', 'h-2 w-full rounded-[3px] ring-1 ring-inset ring-white/10');
-  bar.style.background = rampCss();
+
+  // Scale-mode toggle. Relative is the default: it is what makes a zoomed-in view legible.
+  const modes = el('div', 'flex divide-x divide-edge overflow-hidden rounded border border-edge');
+  const modeBtnClass =
+    'px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
+    'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
+  const btnAbs = el('button', modeBtnClass, 'absolute');
+  const btnRel = el('button', modeBtnClass, 'relative');
+  btnAbs.type = 'button';
+  btnRel.type = 'button';
+  modes.append(btnAbs, btnRel);
+
+  const legendCap = el('div', 'mb-1.5 flex items-center justify-between');
+  const legendNote = el('span', 'label');
+  legendCap.append(modes, legendNote);
+
+  const barWrap = el(
+    'div',
+    'relative h-2 w-full overflow-hidden rounded-[3px] ring-1 ring-inset ring-white/10',
+  );
+  const barAbs = el('div', 'absolute inset-0');
+  const barRel = el('div', 'absolute inset-0');
+  barAbs.style.background = rampCss(DIVERGING_STOPS);
+  barRel.style.background = rampCss(SEQUENTIAL_STOPS);
+  // The sequential ramp fades in over the diverging one, matching the shader's own cross-fade.
+  // `difference` blending keeps the 0 °C marker visible against both pale gold and deep violet.
+  const zeroMark = el('div', 'absolute top-0 h-full w-px bg-white opacity-0 mix-blend-difference');
+  zeroMark.title = '0 °C';
+  barWrap.append(barAbs, barRel, zeroMark);
+
   const ticks = el('div', 'relative mt-1.5 h-3');
-  // The low end is labelled with an inequality because Antarctic plateau means genuinely go below
-  // the encoded floor (observed minimum is about -68 C) and are clamped.
-  const tickDefs: [number, string][] = [
-    [0, `≤ ${meta.tMin}`],
-    [0.25, '−25'],
-    [0.5, '0'],
-    [0.75, '+25'],
-    [1, `+${meta.tMax}`],
-  ];
-  for (const [pos, text] of tickDefs) {
-    const t = el('span', 'absolute -translate-x-1/2 text-[9px] tabular-nums text-haze/70', text);
+  const TICK_POS = [0, 0.25, 0.5, 0.75, 1];
+  const tickEls = TICK_POS.map((pos) => {
+    const t = el('span', 'absolute -translate-x-1/2 text-[9px] tabular-nums text-haze/70');
     t.style.left = `${pos * 100}%`;
     ticks.appendChild(t);
-  }
-  const legendCap = el('div', 'label mb-1.5 flex justify-between');
-  legendCap.innerHTML = `<span>degrees celsius</span><span class="text-haze/50">±${meta.quantisationC}° steps</span>`;
-  legend.append(legendCap, bar, ticks);
+    return t;
+  });
+  const zeroLabel = el(
+    'span',
+    'absolute -translate-x-1/2 text-[9px] tabular-nums text-chalk/80 opacity-0 transition-opacity',
+    '0°',
+  );
+  ticks.appendChild(zeroLabel);
+
+  legend.append(legendCap, barWrap, ticks);
 
   // transport ----------------------------------------------------------------------------------
   const transport = el('div', 'flex items-center gap-4');
@@ -193,7 +221,20 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     last = performance.now();
   };
 
+  const ACTIVE_MODE = 'bg-chalk/90 text-ink';
+  const IDLE_MODE = 'text-haze hover:bg-white/5';
+  const setRelative = (on: boolean) => {
+    globe.relative = on;
+    btnAbs.className = `${modeBtnClass} ${on ? IDLE_MODE : ACTIVE_MODE}`;
+    btnRel.className = `${modeBtnClass} ${on ? ACTIVE_MODE : IDLE_MODE}`;
+    btnAbs.setAttribute('aria-pressed', String(!on));
+    btnRel.setAttribute('aria-pressed', String(on));
+    legendNote.textContent = on ? 'scaled to view' : `full range · ±${meta.quantisationC}° steps`;
+  };
+
   play.addEventListener('click', () => setPlaying(!playing));
+  btnAbs.addEventListener('click', () => setRelative(false));
+  btnRel.addEventListener('click', () => setRelative(true));
   // Grabbing the scrubber is an unambiguous request to take manual control.
   scrub.addEventListener('pointerdown', () => setPlaying(false));
   scrub.addEventListener('input', () => setMonth(Number(scrub.value) / STEPS_PER_MONTH));
@@ -203,6 +244,8 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     if (e.key === ' ') {
       e.preventDefault();
       setPlaying(!playing);
+    } else if (e.key === 'r' || e.key === 'R') {
+      setRelative(!globe.relative);
     } else if (e.key === 'ArrowRight') {
       setPlaying(false);
       setMonth(globe.month + (e.shiftKey ? 1 : 0.25));
@@ -221,11 +264,57 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     py = e.clientY;
   });
 
+  /**
+   * Repaints the legend from the globe's current colour window.
+   *
+   * Tick text is only written when it actually changes: the window moves every frame while the
+   * camera does, and blindly assigning textContent would thrash layout sixty times a second for a
+   * label that reads the same.
+   */
+  const tickText: string[] = TICK_POS.map(() => '');
+  const paintLegend = () => {
+    const { lo, hi } = globe.window;
+    const blend = globe.rampBlend;
+    barRel.style.opacity = String(blend);
+
+    // The sequential ramp gives up "white means freezing", so hand that reference back explicitly
+    // whenever 0 °C actually falls inside the window.
+    const zeroPos = (0 - lo) / (hi - lo);
+    const showZero = blend > 0.15 && zeroPos > 0.02 && zeroPos < 0.98;
+    const zeroOpacity = showZero ? String(Math.min(1, (blend - 0.15) / 0.4)) : '0';
+    zeroMark.style.opacity = zeroOpacity;
+    zeroLabel.style.opacity = zeroOpacity;
+    if (showZero) {
+      zeroMark.style.left = `${zeroPos * 100}%`;
+      zeroLabel.style.left = `${zeroPos * 100}%`;
+    }
+
+    for (let i = 0; i < TICK_POS.length; i++) {
+      const value = lo + (hi - lo) * TICK_POS[i]!;
+      const rounded = Math.round(value);
+      // Only the absolute floor is a clamp rather than a measurement, so only it gets the "≤".
+      const atFloor = i === 0 && value <= meta.tMin + 0.05;
+      const next = atFloor
+        ? `≤ ${meta.tMin}`
+        : `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded)}`;
+      if (next !== tickText[i]) {
+        tickText[i] = next;
+        tickEls[i]!.textContent = next;
+      }
+      // Yield to the 0 °C marker where they would print on top of each other — the marker carries
+      // strictly more meaning than a rounded number a few degrees either side of it.
+      tickEls[i]!.style.opacity =
+        showZero && Math.abs(zeroPos - TICK_POS[i]!) < 0.07 ? '0' : '1';
+    }
+  };
+
   const frame = (now: number) => {
     requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.25);
     last = now;
     if (playing) setMonth(globe.month + (dt * months) / YEAR_SECONDS);
+
+    paintLegend();
 
     const h = globe.hover;
     if (!h) {
@@ -234,8 +323,10 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     }
     const { celsius, isLand } = field.sampleAt(h.lon, h.lat, globe.month);
     tip.classList.remove('hidden');
+    // The value stays absolute — only the swatch follows the window, so it matches the surface.
     tipValue.textContent = `${celsius.toFixed(1)} °C`;
-    tipSwatch.style.background = cssForTemp(celsius, meta.tMin, meta.tMax);
+    const { lo, hi } = globe.window;
+    tipSwatch.style.background = blendedCss((celsius - lo) / (hi - lo), globe.rampBlend);
     tipKind.textContent = isLand ? 'land · 2 m air' : 'ocean · sea surface';
     tipCoords.textContent = formatLonLat(h.lon, h.lat);
 
@@ -249,6 +340,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   };
 
   setPlaying(false);
+  setRelative(true);
   setMonth(0);
   requestAnimationFrame(frame);
 }
