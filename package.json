@@ -1,0 +1,31 @@
+{
+  "name": "worldtemp",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Interactive 3D globe of average monthly temperature",
+  "scripts": {
+    "data": "tsx scripts/build-data.ts",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.185.1",
+    "topojson-client": "^3.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/adm-zip": "^0.5.8",
+    "@types/pngjs": "^6.0.5",
+    "@types/three": "^0.185.4",
+    "@types/topojson-client": "^3.1.5",
+    "adm-zip": "^0.6.0",
+    "geotiff": "^3.0.5",
+    "pngjs": "^7.0.0",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

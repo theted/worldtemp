@@ -1,0 +1,41 @@
+{
+  "width": 2160,
+  "height": 1080,
+  "months": 12,
+  "tMin": -50,
+  "tMax": 50,
+  "encoding": "R = (T - tMin) / (tMax - tMin) * 255; G = land mask (255 land / 0 water)",
+  "quantisationC": 0.39,
+  "observed": {
+    "min": -68.46,
+    "max": 39.55
+  },
+  "monthLabels": [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec"
+  ],
+  "sources": [
+    {
+      "layer": "land",
+      "name": "WorldClim 2.1 tavg 10′",
+      "period": "1970–2000",
+      "quantity": "2 m air temperature"
+    },
+    {
+      "layer": "ocean",
+      "name": "NOAA OISST v2 long-term mean",
+      "period": "1991–2020",
+      "quantity": "sea surface temperature"
+    }
+  ]
+}
