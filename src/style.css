@@ -104,3 +104,58 @@
 .scrub:focus-visible {
   outline: none;
 }
+
+/*
+ * Country labels sit over a surface that ranges from near-black violet to pale gold, so neither
+ * light nor dark text alone is legible. White glyphs with a tight dark outline plus a soft glow
+ * work on both: the outline supplies local contrast wherever the ground is bright, the glow does it
+ * where the ground is dark. This is the standard cartographic halo, done with text-shadow.
+ */
+.country-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  white-space: nowrap;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #fff;
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.92),
+    0 0 7px rgba(0, 0, 0, 0.65),
+    1px 0 0 rgba(0, 0, 0, 0.5),
+    -1px 0 0 rgba(0, 0, 0, 0.5),
+    0 1px 0 rgba(0, 0, 0, 0.5),
+    0 -1px 0 rgba(0, 0, 0, 0.5);
+  transition: opacity 180ms ease;
+  will-change: transform, opacity;
+}
+
+/*
+ * The masthead sits directly on the globe with no panel behind it, so once you zoom in far enough
+ * for a bright surface to fill the frame it loses all contrast.
+ *
+ * A halo alone isn't enough here: the attribution lines are deliberately a mid grey, and mid grey
+ * on mid-bright ramp colours is unreadable however it is outlined. So the text keeps a halo and
+ * sits on a soft corner scrim, which restores contrast without introducing a visible panel edge or
+ * brightening the type back into competing with the globe.
+ */
+.masthead {
+  text-shadow:
+    0 1px 6px rgba(7, 9, 13, 0.92),
+    0 0 3px rgba(7, 9, 13, 0.85);
+}
+
+.masthead::before {
+  content: '';
+  position: absolute;
+  inset: -2rem -7rem -4rem -2rem;
+  z-index: -1;
+  background: radial-gradient(
+    115% 100% at 0% 0%,
+    rgba(7, 9, 13, 0.94) 0%,
+    rgba(7, 9, 13, 0.72) 38%,
+    rgba(7, 9, 13, 0) 74%
+  );
+}

@@ -24,6 +24,11 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | slider / `←` `→` | scrub the year (hold `shift` for whole months) |
 | `space` | play / pause |
 | `r` | toggle the colour scale between relative and absolute |
+| `l` | toggle country labels |
+
+It opens centred on Europe, at today's date. Because a monthly mean describes the middle of its
+month, "today" is a position *between* two samples — 30 August sits about half way from the August
+field toward the September one, and the readout says so.
 
 ## Data
 
@@ -90,6 +95,20 @@ first: percentile clipping so one stray sample can't seize the scale, exponentia
 window settles like a camera's auto-exposure instead of strobing, and a minimum span so uniform
 ocean doesn't get amplified into noise.
 
+**Country names are DOM text, not geometry.** Real text rendering stays crisp at every zoom,
+inherits the page font, and needs no glyph atlas, no SDF shader and no committed font file — which
+matters when the app has to work with no network at all. The cost is that every visible label is
+positioned by hand each frame, so [`src/labels.ts`](src/labels.ts) keeps that work off the layout
+path: widths are measured exactly once at construction, and the frame loop only ever writes
+`transform` and `opacity`.
+
+Which names show is decided per frame — cull anything past the horizon, drop anything whose country
+is too small on screen to be worth naming, then place the rest largest-first, skipping any that
+would collide with one already placed. That ordering is what makes zooming feel right: small
+countries appear as they grow past the threshold instead of fighting their neighbours for room.
+Anchors come from an area-weighted centroid computed *on the sphere* — in lon/lat, Russia and Fiji
+average their two halves into the middle of the wrong ocean.
+
 **Relative mode swaps the palette, deliberately.** Absolute mode is diverging (blue-white-red) because
 0 °C is a real midpoint. A moving window has no meaningful midpoint, so it gets a *sequential* ramp
 where lightness rises monotonically and no colour makes an absolute claim — otherwise a 30 °C Sahara
@@ -123,7 +142,8 @@ src/exposure.ts         auto-exposure: what is the hottest and coldest thing on 
 src/globe.ts            scene, shader, camera framing, raycast hover
 src/stars.ts            the starfield, one draw call
 src/ramp.ts             both colour ramps — single source of truth for shader and legend
-src/borders.ts          TopoJSON → great-circle-subdivided line segments
+src/countries.ts        TopoJSON → border lines and label anchors, from one fetch and one parse
+src/labels.ts           country names: project, cull, declutter, place
 src/ui.ts               masthead, legend, transport, tooltip
 ```
 

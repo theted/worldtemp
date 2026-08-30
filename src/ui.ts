@@ -44,6 +44,30 @@ function monthToDateLabel(month: number, months: number, labels: string[]): stri
   return `${date.getUTCDate()} ${labels[date.getUTCMonth()] ?? ''}`;
 }
 
+/**
+ * Today's date as a continuous month position — the inverse of `monthToDateLabel`.
+ *
+ * Opening on the current date rather than on January makes the globe show the season you are
+ * actually in. Since a monthly mean is centred mid-month, a date in late August sits most of the
+ * way from the August sample toward the September one, not at "August".
+ */
+function dateToMonth(date: Date, months: number): number {
+  const year = date.getUTCFullYear();
+  const dayOfYear =
+    Math.floor(
+      (Date.UTC(year, date.getUTCMonth(), date.getUTCDate()) - Date.UTC(year, 0, 1)) / 86400000,
+    ) + 1;
+
+  for (let i = 0; i < months; i++) {
+    const d0 = MID_MONTH_DOY[i] ?? 15;
+    let d1 = MID_MONTH_DOY[(i + 1) % months] ?? 15;
+    if (d1 < d0) d1 += 365; // the December → January bracket wraps the year end
+    const d = dayOfYear < d0 ? dayOfYear + 365 : dayOfYear;
+    if (d >= d0 && d <= d1) return i + (d - d0) / (d1 - d0);
+  }
+  return 0;
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className = '',
@@ -62,7 +86,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   // ------------------------------------------------------------------------------------------
   // masthead
   // ------------------------------------------------------------------------------------------
-  const header = el('header', 'pointer-events-none absolute left-0 top-0 p-6 md:p-8 select-none');
+  const header = el('header', 'masthead pointer-events-none absolute left-0 top-0 z-10 p-6 md:p-8 select-none');
   header.innerHTML = `
     <h1 class="text-[13px] tracking-[0.42em] text-chalk">WORLDTEMP</h1>
     <p class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>
@@ -100,7 +124,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   // ------------------------------------------------------------------------------------------
   const console_ = el(
     'div',
-    'absolute inset-x-0 bottom-0 flex justify-center p-4 md:p-6 pointer-events-none',
+    'absolute inset-x-0 bottom-0 z-10 flex justify-center p-4 md:p-6 pointer-events-none',
   );
   const panel = el(
     'div',
@@ -121,9 +145,18 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
   btnRel.type = 'button';
   modes.append(btnAbs, btnRel);
 
-  const legendCap = el('div', 'mb-1.5 flex items-center justify-between');
+  const chipClass =
+    'rounded border border-edge px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
+    'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
+  const btnLabels = el('button', chipClass, 'labels');
+  btnLabels.type = 'button';
+
+  const controls = el('div', 'flex items-center gap-2');
+  controls.append(modes, btnLabels);
+
+  const legendCap = el('div', 'mb-1.5 flex items-center justify-between gap-3');
   const legendNote = el('span', 'label');
-  legendCap.append(modes, legendNote);
+  legendCap.append(controls, legendNote);
 
   const barWrap = el(
     'div',
@@ -232,9 +265,16 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
     legendNote.textContent = on ? 'scaled to view' : `full range · ±${meta.quantisationC}° steps`;
   };
 
+  const setLabels = (on: boolean) => {
+    globe.labels = on;
+    btnLabels.className = `${chipClass} ${on ? ACTIVE_MODE : IDLE_MODE}`;
+    btnLabels.setAttribute('aria-pressed', String(on));
+  };
+
   play.addEventListener('click', () => setPlaying(!playing));
   btnAbs.addEventListener('click', () => setRelative(false));
   btnRel.addEventListener('click', () => setRelative(true));
+  btnLabels.addEventListener('click', () => setLabels(!globe.labels));
   // Grabbing the scrubber is an unambiguous request to take manual control.
   scrub.addEventListener('pointerdown', () => setPlaying(false));
   scrub.addEventListener('input', () => setMonth(Number(scrub.value) / STEPS_PER_MONTH));
@@ -246,6 +286,8 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
       setPlaying(!playing);
     } else if (e.key === 'r' || e.key === 'R') {
       setRelative(!globe.relative);
+    } else if (e.key === 'l' || e.key === 'L') {
+      setLabels(!globe.labels);
     } else if (e.key === 'ArrowRight') {
       setPlaying(false);
       setMonth(globe.month + (e.shiftKey ? 1 : 0.25));
@@ -341,6 +383,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field) {
 
   setPlaying(false);
   setRelative(true);
-  setMonth(0);
+  setLabels(true);
+  setMonth(dateToMonth(new Date(), months));
   requestAnimationFrame(frame);
 }

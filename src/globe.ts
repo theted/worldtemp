@@ -2,10 +2,11 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { Field } from './field';
 import { makeRampTexture, DIVERGING_STOPS, SEQUENTIAL_STOPS } from './ramp';
-import { loadBorders } from './borders';
+import { loadCountries } from './countries';
+import { createLabels, type Labels } from './labels';
 import { createStars } from './stars';
 import { createExposure, type TempWindow } from './exposure';
-import { uvToLonLat } from './geo';
+import { lonLatToVec3, uvToLonLat } from './geo';
 
 /**
  * The globe itself: an unlit, colour-mapped sphere, a border overlay, and a starfield behind it.
@@ -112,11 +113,25 @@ const FRAGMENT = /* glsl */ `
 /** Seconds for a mode switch to cross-fade. */
 const MODE_TAU = 0.3;
 
+/** Where the globe is facing on load: central Europe, tilted far enough south to keep the Med in. */
+const OPENING_LON = 15;
+const OPENING_LAT = 45;
+
+/**
+ * How much of the narrower field of view the globe fills on load.
+ *
+ * Below 1 the sphere sits inside the frame with margin; nudging it up pulls the camera in, which is
+ * what makes the opening view read as "looking at Europe" rather than "looking at a planet".
+ */
+const OPENING_FILL = 0.92;
+
 export interface Globe {
   /** Continuous position in the year, 0 = mid-January, wrapping at 12. */
   month: number;
   /** Whether the colour scale follows what is on screen (true) or stays pinned to −50…+50 °C. */
   relative: boolean;
+  /** Whether country names are drawn over the globe. */
+  labels: boolean;
   /** The colour window currently in force, in °C — what the legend must label. */
   readonly window: TempWindow;
   /** Eased 0→1 between absolute and relative, so the legend can cross-fade in step. */
@@ -142,7 +157,9 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   container.appendChild(renderer.domElement);
 
   const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 200);
-  camera.position.set(2.6, 1.0, 0.9); // opens on West Africa, so land and ocean are both in frame
+  // Opens looking down on central Europe. Only the direction matters here; frameGlobe sets the
+  // distance once the viewport size is known.
+  lonLatToVec3(OPENING_LON, OPENING_LAT, 1, camera.position);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
@@ -186,12 +203,14 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   scene.add(stars.points);
 
   let borders: THREE.LineSegments | null = null;
-  loadBorders()
-    .then((lines) => {
-      borders = lines;
-      scene.add(lines);
+  let labels: Labels | null = null;
+  loadCountries()
+    .then((countries) => {
+      borders = countries.lines;
+      scene.add(countries.lines);
+      labels = createLabels(container, countries.anchors);
     })
-    .catch((err) => console.error('borders failed to load', err));
+    .catch((err) => console.error('country layer failed to load', err));
 
   const exposure = createExposure(field);
 
@@ -226,15 +245,20 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
    * margin that leaves the poles clear of the console below.
    */
   let framed = false;
+  let viewW = 1;
+  let viewH = 1;
   const frameGlobe = () => {
     const fovV = THREE.MathUtils.degToRad(camera.fov);
     const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
-    camera.position.setLength(1 / Math.sin(Math.min(fovV, fovH) / 2) / 0.78);
+    camera.position.setLength(1 / Math.sin(Math.min(fovV, fovH) / 2) / OPENING_FILL);
   };
 
   const resize = () => {
     const { clientWidth: w, clientHeight: h } = container;
     if (w === 0 || h === 0) return;
+    // Cached so the label layer can project into screen space without reading layout each frame.
+    viewW = w;
+    viewH = h;
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
@@ -257,6 +281,7 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
   const api: Globe = {
     month: 0,
     relative: true,
+    labels: true,
     get window() {
       return shown;
     },
@@ -277,6 +302,7 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
       rampAbs.dispose();
       rampRel.dispose();
       stars.dispose();
+      labels?.dispose();
       borders?.geometry.dispose();
       (borders?.material as THREE.Material | undefined)?.dispose();
       renderer.dispose();
@@ -313,6 +339,8 @@ export function createGlobe(container: HTMLElement, field: Field): Globe {
     uniforms.uLo.value = (shown.lo - tMin) / (tMax - tMin);
     uniforms.uHi.value = (shown.hi - tMin) / (tMax - tMin);
     uniforms.uRampBlend.value = blend;
+
+    labels?.update(camera, viewW, viewH, api.labels);
 
     if (pointerActive) {
       raycaster.setFromCamera(pointer, camera);
