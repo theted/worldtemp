@@ -20,7 +20,10 @@ export interface SavedState {
   labels: boolean;
   borders: boolean;
   relief: boolean;
+  ocean: boolean;
   stars: boolean;
+  height: boolean;
+  field: 'temperature' | 'daylight';
 }
 
 const isFiniteTriple = (v: unknown): v is [number, number, number] =>

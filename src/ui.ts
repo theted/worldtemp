@@ -1,7 +1,11 @@
 import type { Field } from './field';
-import type { Globe } from './globe';
+import { OCEAN_MUTED_CSS, type Globe } from './globe';
+import { monthToDayOfYear, monthToDateLabel, dateToMonth } from './calendar';
 import { rampCss, blendedCss, zeroPosition, PALETTES, paletteById } from './ramp';
 import { formatLonLat } from './geo';
+import { sunTimes, formatClock, formatDuration } from './sun';
+
+export { dateToMonth };
 
 /**
  * Chrome around the globe: title, legend, scrubber, layers panel, and the hover readout.
@@ -17,56 +21,6 @@ const YEAR_SECONDS = 12;
 
 /** Slider resolution: hundredths of a month, fine enough that scrubbing reads as continuous. */
 const STEPS_PER_MONTH = 100;
-
-/** Day-of-year of the 15th of each month, in a non-leap year. */
-const MID_MONTH_DOY = [15, 46, 74, 105, 135, 166, 196, 227, 258, 288, 319, 349];
-
-/**
- * Renders the continuous month position as an approximate calendar date.
- *
- * Monthly means describe a whole month, so the honest reading of "January" is its midpoint — which
- * makes month 0.5 land near 1 February, not 16 January. Showing a date rather than a month name is
- * what makes the interpolation legible: the reader can see the globe is between two samples.
- */
-function monthToDateLabel(month: number, months: number, labels: string[]): string {
-  const m = ((month % months) + months) % months;
-  const i0 = Math.floor(m);
-  const i1 = (i0 + 1) % months;
-  const f = m - i0;
-
-  const d0 = MID_MONTH_DOY[i0] ?? 15;
-  let d1 = MID_MONTH_DOY[i1] ?? 15;
-  if (d1 < d0) d1 += 365;
-
-  const doy = ((Math.round(d0 + (d1 - d0) * f) - 1) % 365) + 1;
-  const date = new Date(Date.UTC(2001, 0, 1)); // 2001 is not a leap year
-  date.setUTCDate(doy);
-  return `${date.getUTCDate()} ${labels[date.getUTCMonth()] ?? ''}`;
-}
-
-/**
- * Today's date as a continuous month position — the inverse of `monthToDateLabel`.
- *
- * Opening on the current date rather than on January makes the globe show the season you are
- * actually in. Since a monthly mean is centred mid-month, a date in late August sits most of the
- * way from the August sample toward the September one, not at "August".
- */
-export function dateToMonth(date: Date, months: number): number {
-  const year = date.getUTCFullYear();
-  const dayOfYear =
-    Math.floor(
-      (Date.UTC(year, date.getUTCMonth(), date.getUTCDate()) - Date.UTC(year, 0, 1)) / 86400000,
-    ) + 1;
-
-  for (let i = 0; i < months; i++) {
-    const d0 = MID_MONTH_DOY[i] ?? 15;
-    let d1 = MID_MONTH_DOY[(i + 1) % months] ?? 15;
-    if (d1 < d0) d1 += 365; // the December → January bracket wraps the year end
-    const d = dayOfYear < d0 ? dayOfYear + 365 : dayOfYear;
-    if (d >= d0 && d <= d1) return i + (d - d0) / (d1 - d0);
-  }
-  return 0;
-}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -98,7 +52,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   );
   header.innerHTML = `
     <h1 class="text-[13px] tracking-[0.42em] text-chalk">WORLDTEMP</h1>
-    <p class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>
+    <p data-sub class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>
     <div class="mt-5 h-px w-16 bg-edge"></div>
     <dl class="mt-4 space-y-1.5 text-[10px] leading-relaxed text-haze/85">
       ${meta.sources
@@ -110,6 +64,9 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
         )
         .join('')}
     </dl>`;
+  // The page names what it is showing. Leaving "average monthly temperature" over a daylight globe
+  // would be the masthead telling the same lie the legend is built to never tell.
+  const mastheadSub = header.querySelector('[data-sub]');
   root.appendChild(header);
 
   // ------------------------------------------------------------------------------------------
@@ -120,12 +77,26 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     'panel pointer-events-none absolute z-20 hidden rounded-md px-3 py-2 shadow-xl shadow-black/50',
   );
   const tipTemp = el('div', 'flex items-baseline gap-2');
-  const tipSwatch = el('span', 'inline-block size-2.5 shrink-0 rounded-[2px]');
+  const tipSwatch = el(
+    'span',
+    'inline-block size-2.5 shrink-0 rounded-[2px] ring-1 ring-inset ring-white/15',
+  );
   const tipValue = el('span', 'text-[17px] leading-none tabular-nums text-chalk');
   tipTemp.append(tipSwatch, tipValue);
   const tipKind = el('div', 'label mt-1.5');
   const tipCoords = el('div', 'mt-0.5 text-[10px] tabular-nums text-haze/70');
-  tip.append(tipTemp, tipKind, tipCoords);
+
+  // The sun block is ruled off: temperature is measured data, the sun times are computed geometry,
+  // and the reader should be able to see at a glance that they come from different places.
+  const tipSun = el('div', 'mt-2 border-t border-edge pt-2');
+  const tipSunTimes = el('div', 'flex items-baseline gap-3 text-[11px] tabular-nums text-chalk/90');
+  const tipRise = el('span');
+  const tipSet = el('span');
+  tipSunTimes.append(tipRise, tipSet);
+  const tipDaylight = el('div', 'label mt-1');
+  tipSun.append(tipSunTimes, tipDaylight);
+
+  tip.append(tipTemp, tipKind, tipCoords, tipSun);
   root.appendChild(tip);
 
   // ------------------------------------------------------------------------------------------
@@ -140,32 +111,41 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     'panel pointer-events-auto relative w-full max-w-xl rounded-lg px-5 py-4 shadow-2xl shadow-black/60',
   );
 
-  // --- scale mode + layers button ---------------------------------------------------------------
-  const modes = el('div', 'flex divide-x divide-edge overflow-hidden rounded border border-edge');
+  // --- field + scale mode + layers button -------------------------------------------------------
   const modeBtnClass =
     'px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
     'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
+  const segmented = () =>
+    el('div', 'flex divide-x divide-edge overflow-hidden rounded border border-edge');
+
+  // Which quantity is drawn is a bigger decision than how it is scaled, so it sits leftmost, in the
+  // same segmented shape rather than buried in the layers popover.
+  const fields = segmented();
+  const btnTemp = el('button', modeBtnClass, 'temp');
+  const btnDay = el('button', modeBtnClass, 'daylight');
+  btnTemp.type = 'button';
+  btnDay.type = 'button';
+  fields.append(btnTemp, btnDay);
+
+  const modes = segmented();
   const btnAbs = el('button', modeBtnClass, 'absolute');
   const btnRel = el('button', modeBtnClass, 'relative');
   btnAbs.type = 'button';
   btnRel.type = 'button';
   modes.append(btnAbs, btnRel);
 
-  const btnLayers = el('button', `${CHIP} ${CHIP_OFF}`, 'layers');
-  btnLayers.type = 'button';
-  btnLayers.setAttribute('aria-expanded', 'false');
-
-  const controls = el('div', 'flex items-center gap-2');
-  controls.append(modes, btnLayers);
-
+  // The console now carries only what is read continuously — what the colours mean, and when — so
+  // the caption states the two facts the moved controls used to imply: which quantity, which scale.
   const legendCap = el('div', 'mb-1.5 flex items-center justify-between gap-3');
+  const legendField = el('span', 'label');
   const legendNote = el('span', 'label');
-  legendCap.append(controls, legendNote);
+  legendCap.append(legendField, legendNote);
 
-  // --- layers popover ---------------------------------------------------------------------------
-  const pop = el(
+  // --- settings panel ---------------------------------------------------------------------------
+  const settings = el(
     'div',
-    'panel absolute bottom-full left-0 mb-2 hidden w-[17.5rem] rounded-lg px-4 py-3.5 shadow-2xl shadow-black/70',
+    'panel pointer-events-auto absolute right-0 top-full mt-2 hidden w-[19.5rem] ' +
+      'rounded-lg px-4 py-4 shadow-2xl shadow-black/70',
   );
 
   const paletteRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
@@ -181,7 +161,9 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   const layerDefs = [
     { key: 'labels', label: 'names' },
     { key: 'borders', label: 'borders' },
+    { key: 'ocean', label: 'ocean' },
     { key: 'relief', label: 'relief' },
+    { key: 'height', label: '3d' },
     { key: 'stars', label: 'stars' },
   ] as const;
   const layerBtns = layerDefs.map((d) => {
@@ -192,12 +174,50 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     return { key: d.key, el: b };
   });
 
-  pop.append(
-    el('div', 'label', 'palette'),
-    paletteRow,
-    el('div', 'label mt-3.5', 'show'),
-    showRow,
+  /** A titled block. Ruled off from the one above, so the groups read as groups. */
+  const section = (title: string, body: HTMLElement) => {
+    const wrap = el('div', 'mt-3.5 border-t border-edge/60 pt-3.5 first:mt-0 first:border-0 first:pt-0');
+    wrap.append(el('div', 'label', title), body);
+    return wrap;
+  };
+  const row = (child: HTMLElement) => {
+    const r = el('div', 'mt-1.5 flex');
+    r.appendChild(child);
+    return r;
+  };
+
+  settings.append(
+    section('field', row(fields)),
+    section('scale', row(modes)),
+    section('palette', paletteRow),
+    section('layers', showRow),
   );
+
+  // --- settings button, top right ---------------------------------------------------------------
+  const ICON_COG = `<svg viewBox="0 0 24 24" class="size-[15px]" fill="none" stroke="currentColor"
+    stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="3"/>
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33
+      1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0
+      1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0
+      4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0
+      0 0 10.09 3V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83
+      2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+  </svg>`;
+  const gearClass = (open: boolean) =>
+    'grid size-9 place-items-center rounded-full border border-edge transition ' +
+    'focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 ' +
+    'focus-visible:outline-haze ' +
+    (open ? 'bg-chalk/90 text-ink' : 'bg-ink/50 text-haze hover:text-chalk hover:bg-white/10');
+
+  const btnGear = el('button', gearClass(false), ICON_COG);
+  btnGear.type = 'button';
+  btnGear.setAttribute('aria-label', 'settings');
+  btnGear.setAttribute('aria-expanded', 'false');
+
+  const gearWrap = el('div', 'pointer-events-auto absolute right-6 top-6 z-30 md:right-8 md:top-8');
+  gearWrap.append(btnGear, settings);
+  root.appendChild(gearWrap);
 
   // --- legend bar -------------------------------------------------------------------------------
   const legend = el('div', 'mb-4');
@@ -209,7 +229,6 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   const barTo = el('div', 'absolute inset-0');
   // `difference` blending keeps the 0 °C marker visible against every palette, light or dark.
   const zeroMark = el('div', 'absolute top-0 h-full w-px bg-white opacity-0 mix-blend-difference');
-  zeroMark.title = '0 °C';
   barWrap.append(barFrom, barTo, zeroMark);
 
   const ticks = el('div', 'relative mt-1.5 h-3');
@@ -223,7 +242,6 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   const zeroLabel = el(
     'span',
     'absolute -translate-x-1/2 text-[9px] tabular-nums text-chalk/80 opacity-0 transition-opacity',
-    '0°',
   );
   ticks.appendChild(zeroLabel);
 
@@ -270,7 +288,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   dateOut.append(dateBig, dateSub);
 
   transport.append(play, scrubWrap, dateOut);
-  panel.append(pop, legend, transport);
+  panel.append(legend, transport);
   console_.appendChild(panel);
   root.appendChild(console_);
 
@@ -294,6 +312,21 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     last = performance.now();
   };
 
+  const setField = (id: 'temperature' | 'daylight') => {
+    globe.field = id;
+    const day = id === 'daylight';
+    btnTemp.className = `${modeBtnClass} ${day ? CHIP_OFF : CHIP_ON}`;
+    btnDay.className = `${modeBtnClass} ${day ? CHIP_ON : CHIP_OFF}`;
+    btnTemp.setAttribute('aria-pressed', String(!day));
+    btnDay.setAttribute('aria-pressed', String(day));
+    // One word, because the box under the date is 4.5rem wide and two would wrap.
+    dateSub.textContent = day ? 'astronomy' : 'climatology';
+    legendField.textContent = day ? 'hours of daylight' : 'temperature °C';
+    if (mastheadSub) {
+      mastheadSub.textContent = day ? 'hours of daylight' : 'average monthly temperature';
+    }
+  };
+
   const setRelative = (on: boolean) => {
     globe.relative = on;
     btnAbs.className = `${modeBtnClass} ${on ? CHIP_OFF : CHIP_ON}`;
@@ -311,7 +344,10 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     }
   }
 
-  function setLayer(key: 'labels' | 'borders' | 'relief' | 'stars', on: boolean) {
+  function setLayer(
+    key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars',
+    on: boolean,
+  ) {
     globe[key] = on;
     const b = layerBtns.find((x) => x.key === key);
     if (b) {
@@ -320,22 +356,24 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     }
   }
 
-  const setPopOpen = (open: boolean) => {
-    pop.classList.toggle('hidden', !open);
-    btnLayers.className = `${CHIP} ${open ? CHIP_ON : CHIP_OFF}`;
-    btnLayers.setAttribute('aria-expanded', String(open));
+  const setSettingsOpen = (open: boolean) => {
+    settings.classList.toggle('hidden', !open);
+    btnGear.className = gearClass(open);
+    btnGear.setAttribute('aria-expanded', String(open));
   };
 
   play.addEventListener('click', () => setPlaying(!playing));
+  btnTemp.addEventListener('click', () => setField('temperature'));
+  btnDay.addEventListener('click', () => setField('daylight'));
   btnAbs.addEventListener('click', () => setRelative(false));
   btnRel.addEventListener('click', () => setRelative(true));
-  btnLayers.addEventListener('click', (e) => {
+  btnGear.addEventListener('click', (e) => {
     e.stopPropagation();
-    setPopOpen(pop.classList.contains('hidden'));
+    setSettingsOpen(settings.classList.contains('hidden'));
   });
-  pop.addEventListener('click', (e) => e.stopPropagation());
+  settings.addEventListener('click', (e) => e.stopPropagation());
   // Anywhere else — including the globe — dismisses it.
-  document.addEventListener('click', () => setPopOpen(false));
+  document.addEventListener('click', () => setSettingsOpen(false));
 
   // Grabbing the scrubber is an unambiguous request to take manual control.
   scrub.addEventListener('pointerdown', () => setPlaying(false));
@@ -352,8 +390,14 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
       setLayer('labels', !globe.labels);
     } else if (e.key === 'b' || e.key === 'B') {
       setLayer('borders', !globe.borders);
+    } else if (e.key === 'o' || e.key === 'O') {
+      setLayer('ocean', !globe.ocean);
+    } else if (e.key === 'h' || e.key === 'H') {
+      setLayer('height', !globe.height);
+    } else if (e.key === 'd' || e.key === 'D') {
+      setField(globe.field === 'daylight' ? 'temperature' : 'daylight');
     } else if (e.key === 'Escape') {
-      setPopOpen(false);
+      setSettingsOpen(false);
     } else if (e.key === 'ArrowRight') {
       setPlaying(false);
       setMonth(globe.month + (e.shiftKey ? 1 : 0.25));
@@ -388,7 +432,8 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     const { lo, hi } = globe.window;
     const blend = globe.rampBlend;
     const { from, to } = globe.palettePair;
-    const zero = zeroPosition(lo, hi);
+    const spec = globe.spec;
+    const zero = zeroPosition(lo, hi, spec.pivot);
 
     // A diverging palette's stops are repositioned by where 0 °C falls, so the bar's white band
     // stays under freezing — which means the gradient has to be rebuilt as the window moves.
@@ -402,9 +447,10 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     barTo.style.opacity = String(blend);
 
     // The marker only earns its place under a sequential palette. A diverging one already puts its
-    // midpoint on freezing, so a line there would just restate what the white band says.
+    // midpoint on the reference value, so a line there would just restate what the white band says.
     const dominant = blend > 0.5 ? to : from;
     const showZero = dominant.kind === 'sequential' && zero > 0.02 && zero < 0.98;
+    if (zeroLabel.textContent !== spec.pivotLabel) zeroLabel.textContent = spec.pivotLabel;
     const zeroOpacity = showZero ? '1' : '0';
     zeroMark.style.opacity = zeroOpacity;
     zeroLabel.style.opacity = zeroOpacity;
@@ -414,9 +460,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     }
 
     for (let i = 0; i < TICK_POS.length; i++) {
-      const value = lo + (hi - lo) * TICK_POS[i]!;
-      const rounded = Math.round(value);
-      const next = `${rounded > 0 ? '+' : rounded < 0 ? '−' : ''}${Math.abs(rounded)}`;
+      const next = spec.tick(lo + (hi - lo) * TICK_POS[i]!, hi - lo);
       if (next !== tickText[i]) {
         tickText[i] = next;
         tickEls[i]!.textContent = next;
@@ -441,20 +485,50 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
       return;
     }
     const { celsius, isLand } = field.sampleAt(h.lon, h.lat, globe.month);
+    const sun = sunTimes(h.lat, monthToDayOfYear(globe.month, months));
+    const spec = globe.spec;
+    const daylightMode = spec.id === 'daylight';
     tip.classList.remove('hidden');
-    // The value stays absolute — only the swatch follows the window, so it matches the surface.
-    tipValue.textContent = `${celsius.toFixed(1)} °C`;
+
+    // The headline is whichever quantity is being drawn; the other one keeps its place below, so
+    // the readout answers both questions however the globe is coloured.
+    const value = daylightMode ? sun.daylight : celsius;
+    tipValue.textContent = spec.headline(value);
+    tipKind.textContent = spec.kind(isLand);
+    tipCoords.textContent = formatLonLat(h.lon, h.lat);
+
     const { lo, hi } = globe.window;
     const { from, to } = globe.palettePair;
-    tipSwatch.style.background = blendedCss(
-      from,
-      to,
-      (celsius - lo) / (hi - lo),
-      zeroPosition(lo, hi),
-      globe.rampBlend,
-    );
-    tipKind.textContent = isLand ? 'land · 2 m air' : 'ocean · sea surface';
-    tipCoords.textContent = formatLonLat(h.lon, h.lat);
+    // The swatch's whole job is to tie the number to the pixel under the cursor, so when the ocean
+    // is muted it has to show the mute rather than the colour the water would otherwise have had.
+    // That holds for either field: muting the sea is a cartographic choice, not a claim about what
+    // is measured there, so it applies to the daylight gradient exactly as it does to temperature.
+    tipSwatch.style.background =
+      !isLand && !globe.ocean
+        ? OCEAN_MUTED_CSS
+        : blendedCss(
+            from,
+            to,
+            (value - lo) / (hi - lo),
+            zeroPosition(lo, hi, spec.pivot),
+            globe.rampBlend,
+          );
+
+    // Sun times track both the cursor's latitude and the scrubbed date, so sweeping north at a
+    // fixed date and holding still while the year plays are two different, equally readable stories.
+    if (sun.kind === 'normal') {
+      tipRise.textContent = `↑ ${formatClock(sun.sunrise!)}`;
+      tipSet.textContent = `↓ ${formatClock(sun.sunset!)}`;
+    } else {
+      // With no rise or set to print, the phrase carries the whole line.
+      tipRise.textContent = sun.kind === 'midnight-sun' ? '↑ midnight sun' : '↓ polar night';
+      tipSet.textContent = '';
+    }
+    // In daylight mode the duration has been promoted to the headline, so this line stops repeating
+    // it and carries the temperature instead — the field the globe is no longer drawing.
+    tipDaylight.textContent = daylightMode
+      ? `${celsius.toFixed(1)} °C · ${isLand ? 'land' : 'ocean'}`
+      : `${formatDuration(sun.daylight)} · local solar`;
 
     // Keep the card inside the viewport, flipping side and lifting it clear of the pointer.
     const w = tip.offsetWidth;
@@ -466,6 +540,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   };
 
   setPlaying(false);
+  setField(globe.field);
   setRelative(globe.relative);
   setPalette(paletteById(globe.palette).id);
   for (const d of layerDefs) setLayer(d.key, globe[d.key]);

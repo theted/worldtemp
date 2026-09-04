@@ -11,7 +11,12 @@ import {
 import { loadCountries, type Countries } from './countries';
 import { createLabels, type Labels } from './labels';
 import { createStars } from './stars';
+import type { Terrain } from './terrain';
+import type { Elevation } from './elevation';
 import { createExposure, type TempWindow } from './exposure';
+import { fieldSpecs, type FieldId, type FieldSpec } from './fields';
+import { monthToDayOfYear } from './calendar';
+import { solarDeclination, SUNRISE_ZENITH_DEG } from './sun';
 import { lonLatToVec3, uvToLonLat } from './geo';
 
 /**
@@ -22,14 +27,53 @@ import { lonLatToVec3, uvToLonLat } from './geo';
  * scrubbing, zooming and changing palette all read as movement rather than as jump cuts.
  */
 
+/**
+ * The flat ground the ocean falls back to when its colouring is switched off.
+ *
+ * Declared here in linear 0–1 so the shader and the hover swatch cannot drift: the GLSL literal is
+ * interpolated from this array, and `OCEAN_MUTED_CSS` is the same numbers for the DOM. Chosen a
+ * little above the page background rather than equal to it — matching `--color-ink` exactly would
+ * dissolve the sphere's dark limb into space and lose the globe's form.
+ */
+export const OCEAN_MUTED: [number, number, number] = [0.059, 0.086, 0.118];
+
+/**
+ * How far the tallest ground rises above the sphere, as a fraction of its radius.
+ *
+ * Real relief is invisible at this scale and always has been on every globe ever made: Everest is
+ * 8.8 km against a 6371 km radius, 0.14% — thinner than the varnish on a schoolroom globe. So the
+ * question is not whether to exaggerate but by how much, and the honest answer is "until ranges
+ * read and nothing else does".
+ *
+ * 0.035 is about 25x. At that gain the Himalaya, Andes, Rockies, Alps and the Antarctic dome stand
+ * clear at the limb, while a 500 m plateau moves by a fifth of a percent of the radius and stays
+ * the flat thing it is. Push it much past this and continents start to look like crumpled foil.
+ */
+const MAX_EXAGGERATION = 0.035;
+
+export const OCEAN_MUTED_CSS = `rgb(${OCEAN_MUTED.map((c) => Math.round(c * 255)).join(' ')})`;
+
 const VERTEX = /* glsl */ `
+  uniform sampler2D uElev;
+  uniform float uExag;
+
   varying vec2 vUv;
   varying vec3 vNormalW;
   varying vec3 vViewDir;
 
   void main() {
     vUv = uv;
-    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    // The sphere has unit radius, so each vertex position *is* its own outward normal and
+    // displacement is a scalar on the vector itself. The v flip matches the fragment shader's:
+    // the raster's first row is 90 N while the sphere's v = 0 is the south pole.
+    //
+    // Note the surface normal is deliberately left alone. Nothing here is lit, so a normal that
+    // still points straight out costs nothing visually -- only the rim term reads it, and the rim
+    // lives at the silhouette where the displacement is a fraction of a degree of arc. Deriving
+    // true normals would mean three texture fetches per vertex to light a surface that has no
+    // diffuse term to light.
+    float h = texture(uElev, vec2(uv.x, 1.0 - uv.y)).r;
+    vec4 worldPos = modelMatrix * vec4(position * (1.0 + h * uExag), 1.0);
     vNormalW = normalize(mat3(modelMatrix) * normal);
     vViewDir = normalize(cameraPosition - worldPos.xyz);
     gl_Position = projectionMatrix * viewMatrix * worldPos;
@@ -41,6 +85,9 @@ const FRAGMENT = /* glsl */ `
   precision highp sampler2DArray;
 
   uniform sampler2DArray uField;
+  uniform sampler2D uTerrain;
+  uniform float uReliefFlat;
+  uniform float uReliefScale;
   uniform sampler2D uRampA;
   uniform sampler2D uRampB;
   uniform float uRampBlend;
@@ -53,6 +100,9 @@ const FRAGMENT = /* glsl */ `
   uniform float uHi;
   uniform float uDither;
   uniform float uRelief;
+  uniform float uOcean;
+  uniform float uDaylight;
+  uniform float uDecl;
   uniform float uRim;
 
   varying vec2 vUv;
@@ -70,9 +120,25 @@ const FRAGMENT = /* glsl */ `
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
   }
 
-  // Stretches each side of a diverging ramp independently so its midpoint lands on 0 C wherever
-  // that falls in the current window. Without this, "white means freezing" would only be true when
-  // the window happened to be symmetric about zero.
+  const float PI = 3.141592653589793;
+
+  // Hours between sunrise and sunset at a latitude, given the sun's declination.
+  //
+  // The branchless twin of dayLength() in sun.ts, sharing its zenith constant by interpolation so
+  // the two cannot drift. The clamp is what removes the polar branches: where the sun's daily
+  // circle never meets the horizon there is no hour angle, and 0 and 24 hours are exactly the right
+  // answers at the two ends. The denominator is floored so the poles, where cos(phi) vanishes,
+  // divide to a large signed number rather than to NaN.
+  float dayLength(float lat) {
+    float phi = radians(lat);
+    float c = (cos(radians(${SUNRISE_ZENITH_DEG})) - sin(phi) * sin(uDecl))
+            / max(cos(phi) * cos(uDecl), 1e-6);
+    return (24.0 / PI) * acos(clamp(c, -1.0, 1.0));
+  }
+
+  // Stretches each side of a diverging ramp independently so its midpoint lands on the field's
+  // reference value -- 0 C, or 12 hours -- wherever that falls in the current window. Without this,
+  // "white means freezing" would only be true when the window happened to be symmetric about it.
   float zeroSplit(float w) {
     return w < uZero
       ? (w / max(uZero, 1e-4)) * 0.5
@@ -105,6 +171,15 @@ const FRAGMENT = /* glsl */ `
     // what actually lets the eye integrate them back into a continuous gradient.
     t += (ign(gl_FragCoord.xy) - 0.5) * uDither;
 
+    // The second field. It is computed, not sampled: day length falls out of the fragment's own
+    // latitude and one uniform, so it needs no texture, no download and none of the dither above --
+    // there is nothing quantised about it to hide. vUv.y runs south to north, matching uvToLonLat.
+    //
+    // Switched rather than cross-faded. Every other parameter here eases because it is genuinely
+    // continuous, but a temperature morphing into a duration would pass through values that are
+    // neither, under a legend labelling them in one unit or the other.
+    t = mix(t, dayLength(vUv.y * 180.0 - 90.0) / 24.0, uDaylight);
+
     // Window the value. Absolute mode is simply uLo = 0, uHi = 1, so there is no branch and no
     // second code path to keep in sync.
     float w = clamp((t - uLo) / max(uHi - uLo, 1e-4), 0.0, 1.0);
@@ -116,20 +191,44 @@ const FRAGMENT = /* glsl */ `
       uRampBlend
     );
 
-    // --- land/sea relief -------------------------------------------------------------------
-    // The land mask is bilinear-filtered like everything else, so it crosses 0.5 exactly at the
-    // coastline and its screen-space gradient gives a constant-width shoreline at any zoom.
+    // --- terrain ---------------------------------------------------------------------------
+    // Coastline and hillshade both come from the terrain raster rather than from the temperature
+    // field's own mask, which is five times coarser. What looked wrong at full zoom was never the
+    // line's width -- fwidth keeps that constant -- but the contour it traced: the half-way
+    // crossing of a 10-arcmin mask is a rounded lobe, not a fjord.
     //
-    // This does modulate brightness over a colour-mapped field, which the unlit rule otherwise
-    // forbids. It earns the exception on two counts: the modulation is tied to a fixed boundary
-    // rather than to any value, and land and sea genuinely *are* different measurements here -- 2 m
-    // air temperature against sea surface temperature -- so drawing the seam is honest rather than
-    // decorative. It is also toggleable.
-    float coastWidth = fwidth(land) * 1.6 + 1e-5;
-    float coast = 1.0 - smoothstep(0.0, coastWidth, abs(land - 0.5));
+    // The temperature field's own mask above still decides which *measurement* is reported, since
+    // that genuinely is a 10-arcmin fact. This decides only what is drawn.
+    vec2 terr = texture(uTerrain, uvT).rg;
+    float coastMask = terr.g;
+
+    // Signed about the hillshade's flat value, which Natural Earth also uses for the ocean it clips
+    // away -- so this is zero over water and zero over level ground, and non-zero only where there
+    // is relief to show. No mask is needed to keep it off the sea.
+    //
+    // Normalised by the measured swing rather than by the headroom above flat. Level ground sits at
+    // 206 of 255, so the lit side has a sixth of the room the shaded side has; dividing by the lit
+    // side would send deep shadow past -2 and clip the surface under it to black.
+    float shade = clamp((terr.r - uReliefFlat) / uReliefScale, -1.0, 1.0);
+
+    // Muting the sea to a flat ground is not merely cosmetic: with the ocean hidden the auto-
+    // exposure histogram drops ocean samples too, so the ramp is spent entirely on the land field.
+    // Applied before the shading below, so the coastline still draws over the flat water.
+    col = mix(mix(vec3(${OCEAN_MUTED.join(', ')}), col, coastMask), col, uOcean);
+
+    // The shading modulates brightness over a colour-mapped field, which the unlit rule otherwise
+    // forbids, and here it is a real cost: a slope makes one temperature read as two shades. It
+    // earns the exception by being tied to the ground rather than to any value, and by living
+    // behind a toggle -- turn relief off and the surface is a pure function of what is measured.
+    float coastWidth = fwidth(coastMask) * 1.6 + 1e-5;
+    float coast = 1.0 - smoothstep(0.0, coastWidth, abs(coastMask - 0.5));
 
     // Ocean sits very slightly recessed, so the eye reads land as the raised surface.
-    col *= mix(1.0 - 0.06 * uRelief, 1.0, land);
+    col *= mix(1.0 - 0.06 * uRelief, 1.0, coastMask);
+
+    // The hillshade itself. Kept well under the coastline's contrast: it is there to give the eye
+    // a sense of ground, not to compete with the quantity the globe exists to show.
+    col *= 1.0 + shade * 0.50 * uRelief;
 
     // A contrast-inverting shoreline: darkens where the ground is bright, lightens where it is
     // dark. A single fixed colour would disappear at one end of every ramp.
@@ -166,6 +265,10 @@ const OPENING_FILL = 0.92;
 export interface Globe {
   /** Continuous position in the year, 0 = mid-January, wrapping at 12. */
   month: number;
+  /** Which quantity the surface draws. */
+  field: FieldId;
+  /** The active field's descriptor — what the legend and the readout must label. */
+  readonly spec: FieldSpec;
   /** Whether the colour scale follows what is on screen, or stays pinned to the full range. */
   relative: boolean;
   /** Active palette id; changes cross-fade. */
@@ -174,6 +277,10 @@ export interface Globe {
   borders: boolean;
   /** Land/sea relief and the derived coastline. */
   relief: boolean;
+  /** Whether the ocean is colour-mapped at all, or muted to a flat ground. */
+  ocean: boolean;
+  /** Whether the surface is displaced by real elevation. */
+  height: boolean;
   stars: boolean;
   /** The colour window currently in force, in °C — what the legend must label. */
   readonly window: TempWindow;
@@ -196,12 +303,17 @@ export interface GlobeOptions {
   labels?: boolean | undefined;
   borders?: boolean | undefined;
   relief?: boolean | undefined;
+  ocean?: boolean | undefined;
   stars?: boolean | undefined;
+  height?: boolean | undefined;
+  field?: FieldId | undefined;
 }
 
 export function createGlobe(
   container: HTMLElement,
   field: Field,
+  terrain: Terrain,
+  elevation: Elevation,
   options: GlobeOptions = {},
 ): Globe {
   const { tMin, tMax } = field.meta;
@@ -253,6 +365,11 @@ export function createGlobe(
 
   const uniforms = {
     uField: { value: field.texture },
+    uTerrain: { value: terrain.texture },
+    uElev: { value: elevation.texture },
+    uExag: { value: 0 },
+    uReliefFlat: { value: field.meta.terrain.flat / 255 },
+    uReliefScale: { value: field.meta.terrain.scale / 255 },
     uRampA: { value: rampFor(paletteFrom) },
     uRampB: { value: rampFor(paletteTo) },
     uRampBlend: { value: 1 },
@@ -265,6 +382,9 @@ export function createGlobe(
     uHi: { value: 1 },
     uDither: { value: 2 / 255 }, // full quantisation step, peak-to-peak
     uRelief: { value: options.relief === false ? 0 : 1 },
+    uOcean: { value: options.ocean === false ? 0 : 1 },
+    uDaylight: { value: options.field === 'daylight' ? 1 : 0 },
+    uDecl: { value: 0 },
     uRim: { value: 1 },
   };
 
@@ -277,7 +397,11 @@ export function createGlobe(
     fragmentShader: FRAGMENT,
   });
 
-  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 96), material);
+  // 192x96 was ample for a sphere that stayed a sphere. Displacement needs vertices to displace,
+  // and at 1024x512 a quad spans about 20 arcmin -- finer than the elevation grid it samples, and
+  // enough to bend a mountain range. Faceting is not the constraint it would normally be: with no
+  // diffuse term, flat-shaded quads are invisible everywhere except the silhouette.
+  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 1024, 512), material);
   scene.add(sphere);
 
   const stars = createStars();
@@ -286,9 +410,10 @@ export function createGlobe(
 
   let countries: Countries | null = null;
   let labels: Labels | null = null;
-  loadCountries()
+  loadCountries(elevation.sampleAt)
     .then((loaded) => {
       countries = loaded;
+      loaded.setExaggeration(uniforms.uExag.value);
       loaded.setResolution(viewW * pixelRatio, viewH * pixelRatio);
       scene.add(loaded.lines);
       labels = createLabels(container, loaded.anchors);
@@ -360,16 +485,25 @@ export function createGlobe(
   let last = performance.now();
   let elapsed = 0;
   let modeBlend = options.relative === false ? 0 : 1; // eased: 0 = absolute, 1 = relative
+  const specs = fieldSpecs(field, field.meta.months);
+  let spec = specs[options.field === 'daylight' ? 'daylight' : 'temperature'];
   let paletteBlend = 1; // eased 0→1 from paletteFrom to paletteTo
-  const shown: TempWindow = { lo: tMin, hi: tMax };
+  const shown: TempWindow = { lo: spec.min, hi: spec.max };
+  exposure.reset(spec);
 
   const api: Globe = {
     month: 0,
+    field: spec.id,
+    get spec() {
+      return spec;
+    },
     relative: options.relative ?? true,
     palette: paletteTo.id,
     labels: options.labels ?? true,
     borders: options.borders ?? true,
     relief: options.relief ?? true,
+    ocean: options.ocean ?? true,
+    height: options.height ?? false,
     stars: options.stars ?? true,
     get window() {
       return shown;
@@ -425,8 +559,25 @@ export function createGlobe(
     paletteBlend = Math.min(1, paletteBlend + ease * (1 - paletteBlend) + dt * 0.35);
     uniforms.uRampBlend.value = paletteBlend;
 
+    // A field change is discrete: swap the descriptor and let the auto-exposure snap rather than
+    // ease, so the legend never labels a window that is half degrees and half hours.
+    if (api.field !== spec.id) {
+      spec = specs[api.field] ?? specs.temperature;
+      api.field = spec.id;
+      uniforms.uDaylight.value = spec.id === 'daylight' ? 1 : 0;
+      exposure.reset(spec);
+      shown.lo = spec.min;
+      shown.hi = spec.max;
+    }
+
     uniforms.uMonth.value = api.month;
+    uniforms.uDecl.value = solarDeclination(monthToDayOfYear(api.month, field.meta.months));
     uniforms.uRelief.value += ((api.relief ? 1 : 0) - uniforms.uRelief.value) * ease;
+    uniforms.uOcean.value += ((api.ocean ? 1 : 0) - uniforms.uOcean.value) * ease;
+    uniforms.uExag.value += ((api.height ? MAX_EXAGGERATION : 0) - uniforms.uExag.value) * ease;
+    // The outlines have to climb with the ground, or a raised Himalaya swallows the borders across
+    // it. Only while the displacement is actually moving; `setExaggeration` no-ops once settled.
+    countries?.setExaggeration(uniforms.uExag.value);
     stars.points.visible = api.stars;
     stars.update(elapsed);
     if (countries) countries.lines.visible = api.borders;
@@ -437,17 +588,18 @@ export function createGlobe(
     // Skip the measurement only when relative mode is both off and fully faded out; keeping it
     // running the instant the toggle flips means the window is already converging as it fades in.
     if (modeBlend > 0.001 || api.relative) {
-      const measured = exposure.update(camera, api.month, dt);
-      shown.lo = tMin + (measured.lo - tMin) * modeBlend;
-      shown.hi = tMax + (measured.hi - tMax) * modeBlend;
+      const measured = exposure.update(camera, api.month, dt, spec, !api.ocean);
+      shown.lo = spec.min + (measured.lo - spec.min) * modeBlend;
+      shown.hi = spec.max + (measured.hi - spec.max) * modeBlend;
     } else {
-      shown.lo = tMin;
-      shown.hi = tMax;
+      shown.lo = spec.min;
+      shown.hi = spec.max;
     }
 
-    uniforms.uLo.value = (shown.lo - tMin) / (tMax - tMin);
-    uniforms.uHi.value = (shown.hi - tMin) / (tMax - tMin);
-    uniforms.uZero.value = zeroPosition(shown.lo, shown.hi);
+    const fullSpan = spec.max - spec.min;
+    uniforms.uLo.value = (shown.lo - spec.min) / fullSpan;
+    uniforms.uHi.value = (shown.hi - spec.min) / fullSpan;
+    uniforms.uZero.value = zeroPosition(shown.lo, shown.hi, spec.pivot);
 
     labels?.update(camera, viewW, viewH, api.labels);
 

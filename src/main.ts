@@ -1,6 +1,9 @@
 import './style.css';
-import { loadField } from './field';
+import { loadField, loadMeta } from './field';
+import { initDataCache } from './cache';
 import { createGlobe, type Globe } from './globe';
+import { loadTerrain } from './terrain';
+import { loadElevation } from './elevation';
 import { mountUi } from './ui';
 import { loadState, saveState, todayStamp } from './persist';
 
@@ -41,7 +44,10 @@ function startPersisting(globe: Globe) {
     labels: globe.labels,
     borders: globe.borders,
     relief: globe.relief,
+    ocean: globe.ocean,
     stars: globe.stars,
+    height: globe.height,
+    field: globe.field,
   });
 
   const flush = () => {
@@ -64,18 +70,37 @@ async function start() {
   splash.innerHTML = `<p class="text-[10px] tracking-[0.3em] text-haze animate-pulse">LOADING CLIMATOLOGY</p>`;
   root!.appendChild(splash);
 
-  const field = await loadField();
+  // The manifest first, because it names the cache generation everything else is fetched through.
+  const meta = await loadMeta();
+  // A manifest from before the terrain and elevation layers is the likeliest way to arrive here
+  // broken, and reading `undefined.width` three lines later says nothing about why. Named fields,
+  // named fix.
+  for (const key of ['terrain', 'elevation', 'version'] as const) {
+    if (!meta[key]) throw new Error(`meta.json has no "${key}" — re-run \`npm run data\``);
+  }
+  await initDataCache(meta.version);
+  const field = await loadField(meta);
+  // After the field, not alongside it: the terrain raster is scenery, and making the first paint
+  // wait on it would trade the thing the page is for against the thing it is decorated with.
+  const { width, height } = meta.terrain;
+  const [terrain, elevation] = await Promise.all([
+    loadTerrain(width, height),
+    loadElevation(meta.elevation.width, meta.elevation.height),
+  ]);
   splash.remove();
 
   const saved = loadState();
-  const globe = createGlobe(root!, field, {
+  const globe = createGlobe(root!, field, terrain, elevation, {
     camera: saved?.camera,
     relative: saved?.relative,
     palette: saved?.palette,
     labels: saved?.labels,
     borders: saved?.borders,
     relief: saved?.relief,
+    ocean: saved?.ocean,
     stars: saved?.stars,
+    height: saved?.height,
+    field: saved?.field,
   });
 
   // A month scrubbed on an earlier day is stale — this is a climatology, and the natural entry

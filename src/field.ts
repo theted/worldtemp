@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { dataFetch } from './cache';
 
 /**
  * Loads the baked monthly temperature field.
@@ -15,8 +16,17 @@ export interface Meta {
   months: number;
   tMin: number;
   tMax: number;
+  /** Digest of every raster this build wrote — the key the client-side cache is named after. */
+  version: string;
   quantisationC: number;
   observed: { min: number; max: number };
+  /**
+   * The terrain raster's grid, the hillshade byte that means "no slope", and how far the shade
+   * swings either side of it — measured at build time, because the two sides are far from equal.
+   */
+  terrain: { width: number; height: number; flat: number; scale: number };
+  /** The elevation grid, and the metres its byte range spans. */
+  elevation: { width: number; height: number; maxMetres: number; peakMetres: number };
   monthLabels: string[];
   sources: { layer: string; name: string; period: string; quantity: string }[];
 }
@@ -39,10 +49,18 @@ export interface Field {
    * data and smear the extremes the window is trying to find.
    */
   sampleByte(lon: number, lat: number, month: number): number;
+  /**
+   * Is this point land? Nearest-neighbour, without paying for a full reading.
+   *
+   * The auto-exposure histogram needs to know *whether* a sample is land far more often than it
+   * needs the temperature there, and a bilinear mask would be meaningless anyway — a texel is land
+   * or it is not, and 0.5 is not "half a coast".
+   */
+  isLand(lon: number, lat: number, month: number): boolean;
 }
 
 async function decodeLayer(url: string, w: number, h: number): Promise<Uint8ClampedArray> {
-  const res = await fetch(url);
+  const res = await dataFetch(url);
   if (!res.ok) throw new Error(`${res.status} loading ${url}`);
   const bitmap = await createImageBitmap(await res.blob());
   if (bitmap.width !== w || bitmap.height !== h) {
@@ -56,10 +74,19 @@ async function decodeLayer(url: string, w: number, h: number): Promise<Uint8Clam
   return ctx.getImageData(0, 0, w, h).data;
 }
 
-export async function loadField(base = import.meta.env.BASE_URL): Promise<Field> {
-  const metaRes = await fetch(`${base}data/meta.json`);
-  if (!metaRes.ok) throw new Error('meta.json missing — run `npm run data`');
-  const meta = (await metaRes.json()) as Meta;
+/**
+ * The manifest, fetched on its own and never cached.
+ *
+ * It carries the `version` the raster cache is keyed by, so caching it would be circular: a stale
+ * manifest would keep pointing at the generation it was stale for.
+ */
+export async function loadMeta(base = import.meta.env.BASE_URL): Promise<Meta> {
+  const res = await fetch(`${base}data/meta.json`, { cache: 'no-cache' });
+  if (!res.ok) throw new Error('meta.json missing — run `npm run data`');
+  return (await res.json()) as Meta;
+}
+
+export async function loadField(meta: Meta, base = import.meta.env.BASE_URL): Promise<Field> {
   const { width: W, height: H, months: M } = meta;
 
   const layers = await Promise.all(
@@ -157,5 +184,14 @@ export async function loadField(base = import.meta.env.BASE_URL): Promise<Field>
     return a + (byteAt(m1, fx, fy) - a) * f;
   };
 
-  return { meta, texture, sampleAt, sampleByte };
+  const isLand = (lon: number, lat: number, month: number): boolean => {
+    const fx = ((lon + 180) / 360) * W - 0.5;
+    const fy = ((90 - lat) / 180) * H - 0.5;
+    const m = Math.floor(((month % M) + M) % M);
+    const x = ((Math.round(fx) % W) + W) % W;
+    const y = Math.min(Math.max(Math.round(fy), 0), H - 1);
+    return packed[(m * W * H + y * W + x) * 2 + 1]! > 127;
+  };
+
+  return { meta, texture, sampleAt, sampleByte, isLand };
 }

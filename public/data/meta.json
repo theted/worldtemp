@@ -2,13 +2,26 @@
   "width": 2160,
   "height": 1080,
   "months": 12,
+  "terrain": {
+    "width": 10800,
+    "height": 5400,
+    "flat": 206,
+    "scale": 149
+  },
+  "elevation": {
+    "width": 2160,
+    "height": 1080,
+    "maxMetres": 9000,
+    "peakMetres": 6258.66
+  },
   "tMin": -70,
   "tMax": 40,
   "encoding": "R = (T - tMin) / (tMax - tMin) * 255; G = land mask (255 land / 0 water)",
+  "version": "e4e1ac2327208738",
   "quantisationC": 0.43,
   "observed": {
     "min": -68.46,
-    "max": 39.55
+    "max": 39.81
   },
   "monthLabels": [
     "Jan",
@@ -27,6 +40,12 @@
   "sources": [
     {
       "layer": "land",
+      "name": "WorldClim 2.1 / CRU-TS 4.09",
+      "period": "1991–2020",
+      "quantity": "2 m air temperature"
+    },
+    {
+      "layer": "antarctica",
       "name": "WorldClim 2.1 tavg 10′",
       "period": "1970–2000",
       "quantity": "2 m air temperature"
@@ -36,6 +55,18 @@
       "name": "NOAA OISST v2 long-term mean",
       "period": "1991–2020",
       "quantity": "sea surface temperature"
+    },
+    {
+      "layer": "relief",
+      "name": "Natural Earth shaded relief 10m",
+      "period": "SRTM Plus",
+      "quantity": "hillshade and coastline"
+    },
+    {
+      "layer": "height",
+      "name": "NOAA ETOPO 2022 60″",
+      "period": "2022",
+      "quantity": "surface elevation"
     }
   ]
 }

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { dataFetch } from './cache';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
@@ -46,11 +47,16 @@ export interface CountryAnchor {
   radius: number;
 }
 
+/** Normalised height at a geographic point — `Elevation.sampleAt`, without the import cycle. */
+export type Sampler = (lon: number, lat: number) => number;
+
 export interface Countries {
   /** Dark backing pass and the bright line itself, both sharing one geometry. */
   lines: THREE.Group;
   /** Must be told the drawing-buffer size; screen-space line width depends on it. */
   setResolution(width: number, height: number): void;
+  /** Lifts the outlines onto displaced terrain; `0` puts them back on the sphere. */
+  setExaggeration(k: number): void;
   anchors: CountryAnchor[];
   dispose(): void;
 }
@@ -74,7 +80,7 @@ const HALO_WIDTH = 3.4;
 // outlines
 // -----------------------------------------------------------------------------------------------
 
-function addRing(ring: Position[], target: number[]) {
+function addRing(ring: Position[], target: number[], heights: number[], elev: Sampler | null) {
   const a = new THREE.Vector3();
   const b = new THREE.Vector3();
 
@@ -93,9 +99,17 @@ function addRing(ring: Position[], target: number[]) {
     for (let s = 0; s < steps; s++) {
       const t0 = s / steps;
       const t1 = (s + 1) / steps;
-      lonLatToVec3(lon0 + dLon * t0, lat0 + dLat * t0, RADIUS, a);
-      lonLatToVec3(lon0 + dLon * t1, lat0 + dLat * t1, RADIUS, b);
+      const lonA = lon0 + dLon * t0;
+      const latA = lat0 + dLat * t0;
+      const lonB = lon0 + dLon * t1;
+      const latB = lat0 + dLat * t1;
+      lonLatToVec3(lonA, latA, RADIUS, a);
+      lonLatToVec3(lonB, latB, RADIUS, b);
       target.push(a.x, a.y, a.z, b.x, b.y, b.z);
+      // Recorded per vertex so the outlines can be lifted onto displaced terrain later. Without it
+      // a raised Himalaya simply swallows the borders drawn across it, which is worse than no
+      // displacement at all: the map loses the very thing that makes it readable.
+      heights.push(elev ? elev(lonA, latA) : 0, elev ? elev(lonB, latB) : 0);
     }
   }
 }
@@ -169,18 +183,22 @@ function anchorFor(name: string, geometry: Polygon | MultiPolygon): CountryAncho
 
 // -----------------------------------------------------------------------------------------------
 
-export async function loadCountries(base = import.meta.env.BASE_URL): Promise<Countries> {
-  const res = await fetch(`${base}geo/countries-110m.json`);
+export async function loadCountries(
+  elev: Sampler | null = null,
+  base = import.meta.env.BASE_URL,
+): Promise<Countries> {
+  const res = await dataFetch(`${base}geo/countries-110m.json`);
   if (!res.ok) throw new Error(`${res.status} loading country borders`);
   const topo = (await res.json()) as Topology<{ countries: GeometryCollection }>;
   const fc = feature(topo, topo.objects.countries) as FeatureCollection<Polygon | MultiPolygon>;
 
   const positions: number[] = [];
+  const heights: number[] = [];
   const anchors: CountryAnchor[] = [];
 
   for (const f of fc.features) {
     const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-    for (const poly of polys) for (const ring of poly) addRing(ring, positions);
+    for (const poly of polys) for (const ring of poly) addRing(ring, positions, heights, elev);
 
     const name = (f.properties as { name?: string } | null)?.name;
     if (name) {
@@ -190,7 +208,29 @@ export async function loadCountries(base = import.meta.env.BASE_URL): Promise<Co
   }
 
   const geometry = new LineSegmentsGeometry();
-  geometry.setPositions(positions);
+  const displaced = positions.slice();
+  geometry.setPositions(displaced);
+
+  /**
+   * Re-lifts every vertex to the terrain's height for the current exaggeration.
+   *
+   * Rebuilding the whole buffer looks wasteful, and would be if it ran every frame — but it runs
+   * only while the displacement is easing in or out, which is under a second, and the alternative
+   * is patching `LineMaterial`'s instanced vertex shader to sample the elevation itself. Forty
+   * thousand floats is not worth that.
+   */
+  let lastK = -1;
+  const setExaggeration = (k: number) => {
+    if (Math.abs(k - lastK) < 1e-6) return;
+    lastK = k;
+    for (let v = 0; v < heights.length; v++) {
+      const scale = (RADIUS + heights[v]! * k) / RADIUS;
+      displaced[v * 3] = positions[v * 3]! * scale;
+      displaced[v * 3 + 1] = positions[v * 3 + 1]! * scale;
+      displaced[v * 3 + 2] = positions[v * 3 + 2]! * scale;
+    }
+    geometry.setPositions(displaced);
+  };
 
   const make = (color: number, linewidth: number, opacity: number, order: number) => {
     const material = new LineMaterial({
@@ -217,6 +257,7 @@ export async function loadCountries(base = import.meta.env.BASE_URL): Promise<Co
   return {
     lines,
     anchors,
+    setExaggeration,
     setResolution: (width, height) => {
       (halo.material as LineMaterial).resolution.set(width, height);
       (line.material as LineMaterial).resolution.set(width, height);
