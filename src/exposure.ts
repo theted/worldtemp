@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { Field } from './field';
+import type { FieldSpec } from './fields';
 import { vec3ToLonLat, type LonLat } from './geo';
 
 /**
@@ -30,8 +31,27 @@ export interface TempWindow {
 }
 
 export interface Exposure {
-  /** Re-measures the visible field and eases the window toward it. Returns the smoothed window. */
-  update(camera: THREE.PerspectiveCamera, month: number, dt: number): TempWindow;
+  /**
+   * Re-measures the visible field and eases the window toward it. Returns the smoothed window.
+   *
+   * With `landOnly`, ocean samples are dropped from the histogram — the mode for when the ocean is
+   * not being coloured, so the scale describes what is actually on screen.
+   */
+  update(
+    camera: THREE.PerspectiveCamera,
+    month: number,
+    dt: number,
+    spec: FieldSpec,
+    landOnly?: boolean,
+  ): TempWindow;
+  /**
+   * Abandons the smoothed window and snaps to the next measurement.
+   *
+   * Called when the displayed quantity changes. Easing is right for a window that drifts as the
+   * camera moves, but degrees and hours are not on a continuum: easing across would spend a quarter
+   * of a second showing a window that is neither, and the legend would label it.
+   */
+  reset(spec: FieldSpec): void;
   readonly window: TempWindow;
 }
 
@@ -42,20 +62,30 @@ const SAMPLES_Y = 28;
 /** Below this many hits the globe is basically off screen; keep the last good window. */
 const MIN_HITS = 24;
 
-/** Trim this fraction off each tail, so a single outlier can't define the scale. */
-const TAIL = 0.005;
-
-/** Never window tighter than this, or 8-bit quantisation and noise start to dominate. */
-const MIN_SPAN_C = 4;
+/** Trim this fraction off each tail, so a few stray rays can't define the scale. */
+const TAIL = 0.012;
 
 /** Smoothing time constant, seconds. Long enough to feel settled, short enough to feel responsive. */
-const TAU = 0.22;
+const TAU = 0.3;
+
+/**
+ * The most the window is allowed to travel per second, in field units.
+ *
+ * Exponential easing alone cannot fix a discontinuous target, because it moves fastest exactly when
+ * the jump is largest. And the target really is discontinuous: the percentile is a threshold on a
+ * cumulative count, so while Antarctica contributes fewer rays than the tail allows it is ignored
+ * entirely, and the ray that tips it over moves the low end forty degrees in one frame. Everything
+ * mid-ramp drops to the cold end at once, which is the white-to-deep-blue snap you get sliding the
+ * pole into view.
+ *
+ * A speed limit bounds that by construction, whatever the histogram does. Small corrections are
+ * nowhere near it and stay governed by TAU, so responsiveness is untouched; only the leaps are
+ * turned into glides.
+ */
+const MAX_SLEW_PER_S = 26;
 
 export function createExposure(field: Field): Exposure {
-  const { tMin, tMax } = field.meta;
-  const span = tMax - tMin;
-
-  // The data is already 8-bit quantised, so 256 bins are exact rather than an approximation —
+  // Temperature is already 8-bit quantised, so 256 bins are exact rather than an approximation —
   // the histogram costs nothing and gives percentiles for free.
   const hist = new Uint16Array(256);
 
@@ -63,11 +93,25 @@ export function createExposure(field: Field): Exposure {
   const hit = new THREE.Vector3();
   const ll: LonLat = { lon: 0, lat: 0 };
 
-  const window: TempWindow = { lo: tMin, hi: tMax };
-  const target: TempWindow = { lo: tMin, hi: tMax };
+  const window: TempWindow = { lo: 0, hi: 1 };
+  const target: TempWindow = { lo: 0, hi: 1 };
   let settled = false;
 
-  const update = (camera: THREE.PerspectiveCamera, month: number, dt: number): TempWindow => {
+  const reset = (spec: FieldSpec) => {
+    window.lo = target.lo = spec.min;
+    window.hi = target.hi = spec.max;
+    settled = false;
+  };
+
+  const update = (
+    camera: THREE.PerspectiveCamera,
+    month: number,
+    dt: number,
+    spec: FieldSpec,
+    landOnly = false,
+  ): TempWindow => {
+    const { min: tMin, max: tMax, minSpan } = spec;
+    const span = tMax - tMin;
     hist.fill(0);
     let hits = 0;
 
@@ -89,65 +133,78 @@ export function createExposure(field: Field): Exposure {
 
         hit.copy(dir).multiplyScalar(t).add(origin);
         vec3ToLonLat(hit, ll);
-        const bin = Math.round(field.sampleByte(ll.lon, ll.lat, month));
+        // Skipping ocean can starve the histogram completely — mid-Pacific there is no land in
+        // frame at all — but that is exactly what MIN_HITS below already exists to survive.
+        if (landOnly && !field.isLand(ll.lon, ll.lat, month)) continue;
+        const bin = Math.round(spec.sampleByte(ll.lon, ll.lat, month));
         hist[bin < 0 ? 0 : bin > 255 ? 255 : bin]!++;
         hits++;
       }
     }
 
     if (hits >= MIN_HITS) {
-      const cut = Math.floor(hits * TAIL);
+      // Kept fractional, and the crossing interpolated inside its bin. On its own this only removes
+      // the one-bin stair -- the leap across a sparse tail is in the statistic, not its resolution --
+      // but it stops the window juddering by a quantisation step as rays drift between bins.
+      const cut = hits * TAIL;
 
       let acc = 0;
       let loBin = 0;
       for (let i = 0; i < 256; i++) {
-        acc += hist[i]!;
-        if (acc > cut) {
-          loBin = i;
+        const next = acc + hist[i]!;
+        if (next > cut) {
+          loBin = i + (hist[i]! > 0 ? (cut - acc) / hist[i]! : 0);
           break;
         }
+        acc = next;
       }
       acc = 0;
       let hiBin = 255;
       for (let i = 255; i >= 0; i--) {
-        acc += hist[i]!;
-        if (acc > cut) {
-          hiBin = i;
+        const next = acc + hist[i]!;
+        if (next > cut) {
+          hiBin = i + 1 - (hist[i]! > 0 ? (cut - acc) / hist[i]! : 0);
           break;
         }
+        acc = next;
       }
 
       let lo = tMin + (loBin / 255) * span;
       let hi = tMin + (hiBin / 255) * span;
 
-      if (hi - lo < MIN_SPAN_C) {
+      if (hi - lo < minSpan) {
         const mid = (lo + hi) / 2;
-        lo = mid - MIN_SPAN_C / 2;
-        hi = mid + MIN_SPAN_C / 2;
+        lo = mid - minSpan / 2;
+        hi = mid + minSpan / 2;
       }
       // Push back off the ends rather than letting the clamp quietly shrink the span again.
       if (hi > tMax) {
         hi = tMax;
-        lo = Math.min(lo, hi - MIN_SPAN_C);
+        lo = Math.min(lo, hi - minSpan);
       }
       if (lo < tMin) {
         lo = tMin;
-        hi = Math.max(hi, lo + MIN_SPAN_C);
+        hi = Math.max(hi, lo + minSpan);
       }
 
       target.lo = Math.max(lo, tMin);
       target.hi = Math.min(hi, tMax);
     }
 
-    // Frame-rate independent easing. Snap on the very first measurement so the opening view is
-    // correct immediately instead of sliding into place.
+    // Frame-rate independent easing, then a speed limit. Snap on the very first measurement so the
+    // opening view is correct immediately instead of sliding into place.
     const k = settled ? 1 - Math.exp(-dt / TAU) : 1;
-    window.lo += (target.lo - window.lo) * k;
-    window.hi += (target.hi - window.hi) * k;
+    const cap = settled ? MAX_SLEW_PER_S * dt : Infinity;
+    const step = (from: number, to: number) => {
+      const d = (to - from) * k;
+      return from + (d > cap ? cap : d < -cap ? -cap : d);
+    };
+    window.lo = step(window.lo, target.lo);
+    window.hi = step(window.hi, target.hi);
     settled = true;
 
     return window;
   };
 
-  return { update, window };
+  return { update, reset, window };
 }

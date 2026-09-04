@@ -87,6 +87,71 @@ const VIRIDIS: readonly Stop[] = [
   { t: 1.0, hex: '#fde725' },
 ];
 
+/**
+ * Turbo (Mikhailov, Google). A rainbow that is actually usable.
+ *
+ * Rainbows have a bad name in visualisation, and jet earned it: it reverses lightness in the middle,
+ * inventing edges where the data is smooth and hiding real ones where it is not. Turbo was built to
+ * keep the discriminating power of a full-spectrum ramp — many more distinguishable steps than any
+ * two-hue ramp can offer — while making lightness climb monotonically the whole way. It is the
+ * right choice when the question is "how many different values can I tell apart", and the wrong one
+ * when the question is "is this above or below freezing", which is what the diverging ramps answer.
+ */
+const TURBO: readonly Stop[] = [
+  { t: 0.0, hex: '#30123b' },
+  { t: 0.07, hex: '#4145ab' },
+  { t: 0.13, hex: '#4675ed' },
+  { t: 0.2, hex: '#39a2fc' },
+  { t: 0.27, hex: '#1bcfd4' },
+  { t: 0.34, hex: '#24eca6' },
+  { t: 0.41, hex: '#61fc6c' },
+  { t: 0.48, hex: '#a4fc3b' },
+  { t: 0.55, hex: '#d1e834' },
+  { t: 0.62, hex: '#f3c63a' },
+  { t: 0.69, hex: '#fe9b2d' },
+  { t: 0.76, hex: '#f36315' },
+  { t: 0.83, hex: '#d93806' },
+  { t: 0.9, hex: '#b11901' },
+  { t: 1.0, hex: '#7a0402' },
+];
+
+/**
+ * ColorBrewer Spectral, cold end first. Diverging, and far wider through hue than thermal.
+ *
+ * Thermal spends its whole budget on blue and red so that white can mean exactly one thing. Spectral
+ * gives that up — its midpoint is a pale straw rather than a white — and buys green, cyan and amber
+ * with the difference. Two views that thermal renders as "cool blue" and "slightly cooler blue"
+ * separate here into teal and green.
+ */
+const SPECTRAL: readonly Stop[] = [
+  { t: 0.0, hex: '#4b3d8f' },
+  { t: 0.1, hex: '#3288bd' },
+  { t: 0.2, hex: '#66c2a5' },
+  { t: 0.3, hex: '#abdda4' },
+  { t: 0.4, hex: '#e6f598' },
+  { t: 0.5, hex: '#fbf8c0' }, // 0 °C
+  { t: 0.6, hex: '#fee08b' },
+  { t: 0.7, hex: '#fdae61' },
+  { t: 0.8, hex: '#f46d43' },
+  { t: 0.9, hex: '#d53e4f' },
+  { t: 1.0, hex: '#9e0142' },
+];
+
+/** Plasma. Magma's wider sibling — it reaches blue at the bottom instead of stopping at violet. */
+const PLASMA: readonly Stop[] = [
+  { t: 0.0, hex: '#1c0a86' },
+  { t: 0.12, hex: '#41049d' },
+  { t: 0.25, hex: '#6a00a8' },
+  { t: 0.38, hex: '#8f0da4' },
+  { t: 0.5, hex: '#b12a90' },
+  { t: 0.62, hex: '#cc4778' },
+  { t: 0.72, hex: '#e16462' },
+  { t: 0.82, hex: '#f2844b' },
+  { t: 0.9, hex: '#fca636' },
+  { t: 0.96, hex: '#fcce25' },
+  { t: 1.0, hex: '#f0f921' },
+];
+
 /** No hue at all — the quickest way to tell a real pattern from an artefact of the palette. */
 const MONO: readonly Stop[] = [
   { t: 0.0, hex: '#1a1e26' },
@@ -96,7 +161,10 @@ const MONO: readonly Stop[] = [
 
 export const PALETTES: readonly Palette[] = [
   { id: 'thermal', label: 'thermal', kind: 'diverging', stops: THERMAL },
+  { id: 'spectral', label: 'spectral', kind: 'diverging', stops: SPECTRAL },
+  { id: 'turbo', label: 'turbo', kind: 'sequential', stops: TURBO },
   { id: 'magma', label: 'magma', kind: 'sequential', stops: MAGMA },
+  { id: 'plasma', label: 'plasma', kind: 'sequential', stops: PLASMA },
   { id: 'viridis', label: 'viridis', kind: 'sequential', stops: VIRIDIS },
   { id: 'mono', label: 'mono', kind: 'sequential', stops: MONO },
 ];
@@ -128,9 +196,14 @@ export function zeroSplit(w: number, zero: number): number {
   return w < zero ? (w / Math.max(zero, 1e-4)) * 0.5 : 0.5 + ((w - zero) / Math.max(1 - zero, 1e-4)) * 0.5;
 }
 
-/** Where 0 °C sits inside a window, clamped to the ramp. */
-export function zeroPosition(lo: number, hi: number): number {
-  return Math.min(Math.max((0 - lo) / (hi - lo), 0), 1);
+/**
+ * Where the field's reference value sits inside a window, clamped to the ramp.
+ *
+ * `pivot` is 0 °C for temperature and 12 hours for day length — the two values a diverging ramp is
+ * entitled to weld its midpoint to. It defaults to 0 so the temperature callers read unchanged.
+ */
+export function zeroPosition(lo: number, hi: number, pivot = 0): number {
+  return Math.min(Math.max((pivot - lo) / (hi - lo), 0), 1);
 }
 
 /** Samples a ramp at a position in its own space. */
