@@ -56,10 +56,16 @@ const MONTHS = 12;
  * lobe rather than a coastline. Detail there has nothing to do with how finely temperature is
  * known, so it does not have to be bought at the temperature field's twelve layers.
  *
- * Halve these to quarter the VRAM; the build rescales everything from the sources automatically.
+ * 4 arcmin: about 7 km, against the temperature field's 18. Two was better still and looked it, but
+ * a raster that size is 58 megapixels the browser has to decode on its main thread before the globe
+ * can appear, twice over, each through a full RGBA ImageData -- four bytes a pixel to carry one.
+ * That is seconds of frozen tab for detail that only pays at the very end of the zoom range.
+ *
+ * Double these to go back to 2 arcmin, at 4x the VRAM and the startup cost; the build rescales
+ * everything from the sources automatically.
  */
-const REL_W = 10800;
-const REL_H = 5400;
+const REL_W = 5400;
+const REL_H = 2700;
 
 /**
  * Supersampling per axis when rasterising the coastline.

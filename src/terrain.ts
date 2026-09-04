@@ -28,10 +28,11 @@ export async function loadTerrain(
   // interleaving it with a mask and two constant channels put three unrelated bytes between every
   // pair the filter could have used and cost six times the size. Fetched together, so the extra
   // request costs a round trip rather than a round trip each.
-  const [relief, mask] = await Promise.all([
-    decodeGray(`${base}data/relief.png`, width, height),
-    decodeGray(`${base}data/landmask.png`, width, height),
-  ]);
+  // Sequential, not concurrent. Each decode allocates a full RGBA ImageData for the raster -- four
+  // bytes a pixel for one byte of payload -- and running the pair together doubles the peak for no
+  // gain, since both are decoded on the same main thread anyway.
+  const relief = await decodeGray(`${base}data/relief.png`, width, height);
+  const mask = await decodeGray(`${base}data/landmask.png`, width, height);
 
   const packed = new Uint8Array(width * height * 2);
   for (let i = 0, n = width * height; i < n; i++) {

@@ -3,10 +3,10 @@
   "height": 1080,
   "months": 12,
   "terrain": {
-    "width": 10800,
-    "height": 5400,
+    "width": 5400,
+    "height": 2700,
     "flat": 206,
-    "scale": 149
+    "scale": 145
   },
   "elevation": {
     "width": 2160,
@@ -17,7 +17,7 @@
   "tMin": -70,
   "tMax": 40,
   "encoding": "R = (T - tMin) / (tMax - tMin) * 255; G = land mask (255 land / 0 water)",
-  "version": "e4e1ac2327208738",
+  "version": "02e61282ae7d5179",
   "quantisationC": 0.43,
   "observed": {
     "min": -68.46,
