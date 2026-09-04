@@ -1,5 +1,5 @@
 import type { Field } from './field';
-import { OCEAN_MUTED_CSS, type Globe } from './globe';
+import { OCEAN_MUTED_CSS, RELIEF_3D_ENABLED, type Globe } from './globe';
 import { monthToDayOfYear, monthToDateLabel, dateToMonth } from './calendar';
 import { rampCss, blendedCss, zeroPosition, PALETTES, paletteById } from './ramp';
 import { formatLonLat } from './geo';
@@ -158,14 +158,18 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   });
 
   const showRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
-  const layerDefs = [
-    { key: 'labels', label: 'names' },
-    { key: 'borders', label: 'borders' },
-    { key: 'ocean', label: 'ocean' },
-    { key: 'relief', label: 'relief' },
-    { key: 'height', label: '3d' },
-    { key: 'stars', label: 'stars' },
-  ] as const;
+  // The 3-D layer is offered only when the sphere was actually built with the vertices to displace;
+  // a control that cannot do anything is worse than no control.
+  const layerDefs = (
+    [
+      { key: 'labels', label: 'names' },
+      { key: 'borders', label: 'borders' },
+      { key: 'ocean', label: 'ocean' },
+      { key: 'relief', label: 'relief' },
+      ...(RELIEF_3D_ENABLED ? [{ key: 'height', label: '3d' } as const] : []),
+      { key: 'stars', label: 'stars' },
+    ] as const
+  ).slice() as readonly { key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars'; label: string }[];
   const layerBtns = layerDefs.map((d) => {
     const b = el('button', `${CHIP} ${CHIP_OFF}`, d.label);
     b.type = 'button';
@@ -392,7 +396,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
       setLayer('borders', !globe.borders);
     } else if (e.key === 'o' || e.key === 'O') {
       setLayer('ocean', !globe.ocean);
-    } else if (e.key === 'h' || e.key === 'H') {
+    } else if (RELIEF_3D_ENABLED && (e.key === 'h' || e.key === 'H')) {
       setLayer('height', !globe.height);
     } else if (e.key === 'd' || e.key === 'D') {
       setField(globe.field === 'daylight' ? 'temperature' : 'daylight');

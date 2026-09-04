@@ -27,7 +27,6 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | `l` | toggle country labels |
 | `b` | toggle country borders |
 | `o` | toggle ocean colouring |
-| `h` | toggle 3-D relief |
 | `d` | switch between temperature and daylight |
 
 Everything configurable lives behind the cog in the top-right corner: which **field** is drawn
@@ -276,7 +275,9 @@ on a mountainside, which is precisely what the no-diffuse rule exists to prevent
 exception by being tied to the ground rather than to any value, and by sitting behind the **relief**
 toggle — turn it off and the surface is once again a pure function of what is measured.
 
-**The globe can be bent into three dimensions, and the hillshade cannot do it.** A shaded relief is
+**The globe can be bent into three dimensions, and the hillshade cannot do it.** *(Behind
+`RELIEF_3D_ENABLED` in [`src/globe.ts`](src/globe.ts), off by default — see the note at the end of
+this section.)* A shaded relief is
 already a *derivative* of height — roughly how much a slope faces the light — so displacing geometry
 by it would raise the lit flank of every ridge and sink the shaded one. `h` uses real elevation
 instead, from [ETOPO 2022](https://www.ncei.noaa.gov/products/etopo-global-relief-model), at 10
@@ -295,6 +296,18 @@ the same reason: deriving true ones would cost three texture fetches per vertex 
 with no diffuse term. The country outlines *do* have to climb with the ground, though — otherwise a
 raised Himalaya simply swallows the borders drawn across it, which loses the very thing that makes
 the map readable.
+
+The flag exists because of what the fine grid costs when the layer is *off*. Displacement needs
+vertices to displace, and a 1024 × 512 sphere is 28 times the geometry of the 192 × 96 one on every
+frame whether or not anything is being displaced. That is the part that wants more thought — the
+displacement itself works — so the sphere goes back to its old tessellation and the control is not
+offered until it does.
+
+Its first casualty was worth finding, and outlived it. The hover readout used to raycast the sphere
+*mesh*, and `intersectObject` tests every triangle: there is no BVH on a plain `Mesh`. At 36
+thousand triangles nobody noticed; at a million it became the frame. The globe is a unit sphere, so
+its intersection is a quadratic — O(1), exact rather than tessellated, and the same three lines the
+auto-exposure sampler has used all along. That fix stands regardless of the flag.
 
 **Switching the ocean off rescales the map, not just the pixels.** With `o` the sea is muted to a
 flat ground and the land field reads on its own. Doing only that would disappoint, though: in

@@ -17,7 +17,7 @@ import { createExposure, type TempWindow } from './exposure';
 import { fieldSpecs, type FieldId, type FieldSpec } from './fields';
 import { monthToDayOfYear } from './calendar';
 import { solarDeclination, SUNRISE_ZENITH_DEG } from './sun';
-import { lonLatToVec3, uvToLonLat } from './geo';
+import { lonLatToVec3, vec3ToLonLat } from './geo';
 
 /**
  * The globe itself: an unlit, colour-mapped sphere, country outlines, names, and a starfield.
@@ -50,6 +50,20 @@ export const OCEAN_MUTED: [number, number, number] = [0.059, 0.086, 0.118];
  * the flat thing it is. Push it much past this and continents start to look like crumpled foil.
  */
 const MAX_EXAGGERATION = 0.035;
+
+/**
+ * Whether the 3-D relief layer exists at all.
+ *
+ * Displacement needs vertices to displace, and a sphere carrying enough of them is a cost paid on
+ * every frame whether or not the layer is switched on. Behind the flag the globe goes back to the
+ * tessellation it had before, and the layer's control is not offered; in front of it the sphere is
+ * 28x heavier. Kept as a flag rather than deleted because the feature works -- it is the standing
+ * cost of being *able* to use it that wants more thought.
+ */
+export const RELIEF_3D_ENABLED = false;
+
+/** Segments around and over the sphere. Displacement is the only thing that needs the fine grid. */
+const SPHERE_SEGMENTS = RELIEF_3D_ENABLED ? [1024, 512] : [192, 96];
 
 export const OCEAN_MUTED_CSS = `rgb(${OCEAN_MUTED.map((c) => Math.round(c * 255)).join(' ')})`;
 
@@ -397,11 +411,14 @@ export function createGlobe(
     fragmentShader: FRAGMENT,
   });
 
-  // 192x96 was ample for a sphere that stayed a sphere. Displacement needs vertices to displace,
-  // and at 1024x512 a quad spans about 20 arcmin -- finer than the elevation grid it samples, and
+  // 192x96 is ample for a sphere that stays a sphere. Displacement needs vertices to displace, and
+  // at 1024x512 a quad spans about 20 arcmin -- finer than the elevation grid it samples, and
   // enough to bend a mountain range. Faceting is not the constraint it would normally be: with no
   // diffuse term, flat-shaded quads are invisible everywhere except the silhouette.
-  const sphere = new THREE.Mesh(new THREE.SphereGeometry(1, 1024, 512), material);
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(1, SPHERE_SEGMENTS[0], SPHERE_SEGMENTS[1]),
+    material,
+  );
   scene.add(sphere);
 
   const stars = createStars();
@@ -426,6 +443,8 @@ export function createGlobe(
   // hover
   // ---------------------------------------------------------------------------------------------
   const raycaster = new THREE.Raycaster();
+  const hitPoint = new THREE.Vector3();
+  const hoverLonLat = { lon: 0, lat: 0 };
   const pointer = new THREE.Vector2();
   let hover: { lon: number; lat: number } | null = null;
   let pointerActive = false;
@@ -503,7 +522,7 @@ export function createGlobe(
     borders: options.borders ?? true,
     relief: options.relief ?? true,
     ocean: options.ocean ?? true,
-    height: options.height ?? false,
+    height: RELIEF_3D_ENABLED ? (options.height ?? false) : false,
     stars: options.stars ?? true,
     get window() {
       return shown;
@@ -604,11 +623,21 @@ export function createGlobe(
     labels?.update(camera, viewW, viewH, api.labels);
 
     if (pointerActive) {
+      // Intersected analytically rather than against the mesh. `intersectObject` tests every
+      // triangle -- there is no BVH on a plain Mesh -- so it cost a few thousand tests a frame at
+      // the old tessellation and over a million at the new one, for a shape whose intersection is
+      // a quadratic. Same maths as the auto-exposure sampler, and exact rather than tessellated.
       raycaster.setFromCamera(pointer, camera);
-      const hit = raycaster.intersectObject(sphere, false)[0];
-      // uv comes straight from the parameterisation the shader samples, so the readout and the
-      // picture can never disagree about which pixel is under the cursor.
-      hover = hit?.uv ? uvToLonLat(hit.uv.x, hit.uv.y) : null;
+      const o = raycaster.ray.origin;
+      const d = raycaster.ray.direction;
+      const b = o.dot(d);
+      const disc = b * b - (o.dot(o) - 1);
+      const t = disc > 0 ? -b - Math.sqrt(disc) : -1; // near root: the hemisphere facing us
+      if (t > 0) {
+        hover = vec3ToLonLat(hitPoint.copy(d).multiplyScalar(t).add(o), hoverLonLat);
+      } else {
+        hover = null;
+      }
     }
 
     renderer.render(scene, camera);
