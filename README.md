@@ -23,6 +23,7 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | hover | read the temperature, and the sunrise/sunset, under the cursor |
 | slider / `←` `→` | scrub the year (hold `shift` for whole months) |
 | `space` | play / pause |
+| speed slider / `[` `]` | playback rate, 0.25× to 4× |
 | `r` | toggle the colour scale between relative and absolute |
 | `l` | toggle country labels |
 | `b` | toggle country borders |
@@ -34,6 +35,12 @@ Everything configurable lives behind the cog in the top-right corner: which **fi
 (absolute or relative), which **palette**, and which **layers**. The console along the bottom keeps
 only the two things you read continuously — what the colours mean, and when — and its caption states
 the two facts the moved controls used to imply.
+
+Under the scrubber, on the same three-column grid, is the playback rate. It is a log scale — one
+full year in twelve seconds at 1×, four times that at each end — so half speed and double speed sit
+the same distance either side of centre, with a detent on 1× because otherwise landing exactly on it
+is luck. A year that takes 48 seconds is long enough to watch the monsoon arrive; one that takes
+three is the whole planet breathing.
 
 Seven palettes. Two are diverging, and only they claim their midpoint means something: **thermal**
 welds white to 0 °C, **spectral** does the same with a pale straw but spends the difference on

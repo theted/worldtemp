@@ -18,6 +18,9 @@
   --color-edge: #1e2733;
   --color-haze: #7d8896;
   --color-chalk: #dbe3ec;
+
+  /* One easing for every control, so the chrome moves as a single mechanism. */
+  --ease-ui: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 @layer base {
@@ -32,10 +35,28 @@
 }
 
 @layer components {
+  /*
+   * The panels float over a globe that runs from near-black ocean to near-white ice, so a single
+   * flat tint cannot hold. Three things together make them read as one dark glass:
+   *   - a vertical gradient, so the surface has a direction and does not look like a decal;
+   *   - a mostly-opaque tint, because the globe runs to full-brightness gold and glass thin enough
+   *     to be pretty over the ocean turns the 9px legend type unreadable over the Sahara;
+   *   - a one-pixel inset highlight along the top edge, which is what actually sells "glass" —
+   *     it reads as light catching a bevel rather than as a border.
+   */
   .panel {
-    background: color-mix(in srgb, var(--color-panel) 82%, transparent);
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--color-panel) 90%, transparent) 0%,
+      color-mix(in srgb, #05070b 94%, transparent) 100%
+    );
     border: 1px solid var(--color-edge);
-    backdrop-filter: blur(12px);
+    backdrop-filter: blur(24px) saturate(115%);
+    -webkit-backdrop-filter: blur(24px) saturate(115%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.065),
+      0 20px 44px -14px rgba(0, 0, 0, 0.8),
+      0 2px 10px -4px rgba(0, 0, 0, 0.6);
   }
 
   .label {
@@ -47,9 +68,198 @@
 }
 
 /*
- * The slider is the primary instrument on the page, so it gets a real design rather than the
+ * Popover. Hidden with `visibility` rather than `display`, for two reasons: it can be animated,
+ * and — less obviously — the box stays measurable while closed, which is what lets the segmented
+ * controls inside it position their indicator before they are ever shown.
+ *
+ * The visibility transition is delayed by the length of the others so the panel stays hittable
+ * until it has finished fading out, then goes inert in one step.
+ */
+.pop {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-8px) scale(0.97);
+  transform-origin: top right;
+  transition:
+    opacity 150ms ease,
+    transform 240ms var(--ease-ui),
+    visibility 0s linear 240ms;
+}
+
+.pop[data-open='true'] {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s, 0s, 0s;
+}
+
+/*
+ * Segmented control — one of a set. The indicator is a single element that slides between the
+ * options rather than a background that blinks on and off: the movement itself says the choices
+ * are alternatives on one axis, which is exactly what "absolute / relative" is.
+ */
+.seg {
+  position: relative;
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--color-edge);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.seg__thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  width: 0;
+  border-radius: 7px;
+  background: rgba(219, 227, 236, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  transition:
+    left 280ms var(--ease-ui),
+    width 280ms var(--ease-ui);
+}
+
+.seg__btn {
+  position: relative;
+  z-index: 1;
+  padding: 4px 11px;
+  border-radius: 7px;
+  font-size: 0.5625rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-haze);
+  transition: color 160ms ease;
+}
+
+.seg__btn:hover,
+.seg__btn[aria-pressed='true'] {
+  color: var(--color-chalk);
+}
+
+.seg__btn:focus-visible {
+  outline: 1px solid var(--color-haze);
+  outline-offset: 1px;
+}
+
+/*
+ * Toggle pill — independently on or off, so it gets an indicator lamp rather than a slot in a
+ * group. State lives in `aria-pressed` and nowhere else; the styling reads it, which means the
+ * accessible name and the appearance cannot drift apart.
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid var(--color-edge);
+  border-radius: 999px;
+  font-size: 0.5625rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-haze);
+  transition:
+    color 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.chip::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.3;
+  transition:
+    opacity 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.chip:hover {
+  color: var(--color-chalk);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.chip[aria-pressed='true'] {
+  color: var(--color-chalk);
+  border-color: color-mix(in srgb, var(--color-chalk) 22%, transparent);
+  background: rgba(219, 227, 236, 0.09);
+}
+
+.chip[aria-pressed='true']::before {
+  opacity: 1;
+  box-shadow: 0 0 7px color-mix(in srgb, var(--color-chalk) 60%, transparent);
+}
+
+.chip:focus-visible {
+  outline: 1px solid var(--color-haze);
+  outline-offset: 2px;
+}
+
+/*
+ * Palette picker. Naming a palette in text asks the reader to remember what "viridis" looks like;
+ * showing the ramp asks nothing. The swatch is the same gradient the legend and the shader use.
+ */
+.pal {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+.pal__bar {
+  display: block;
+  height: 0.5rem;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  transition:
+    box-shadow 180ms ease,
+    transform 180ms var(--ease-ui);
+}
+
+.pal:hover .pal__bar {
+  transform: translateY(-1px);
+}
+
+/* Ring with a dark gap, so the selection reads on a swatch of any brightness. */
+.pal[aria-pressed='true'] .pal__bar {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.24),
+    0 0 0 1.5px var(--color-panel),
+    0 0 0 3px color-mix(in srgb, var(--color-chalk) 85%, transparent);
+}
+
+.pal__name {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.5rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-haze);
+  transition: color 160ms ease;
+}
+
+.pal:hover .pal__name,
+.pal[aria-pressed='true'] .pal__name {
+  color: var(--color-chalk);
+}
+
+.pal:focus-visible {
+  outline: none;
+}
+
+.pal:focus-visible .pal__name {
+  color: var(--color-chalk);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/*
+ * The scrubber is the primary instrument on the page, so it gets a real design rather than the
  * browser default. Track and thumb are styled per-engine because the pseudo-elements are not
- * shared, and the whole control is 12 rem of continuous year with no detents.
+ * shared, and the whole control is a continuous year with no detents.
  */
 .scrub {
   -webkit-appearance: none;
@@ -61,14 +271,14 @@
 }
 
 .scrub::-webkit-slider-runnable-track {
-  height: 2px;
+  height: 3px;
   border-radius: 999px;
-  background: linear-gradient(to right, #2b3644, #46566b);
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.2));
 }
 .scrub::-moz-range-track {
-  height: 2px;
+  height: 3px;
   border-radius: 999px;
-  background: linear-gradient(to right, #2b3644, #46566b);
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.2));
 }
 
 .scrub::-webkit-slider-thumb {
@@ -76,12 +286,14 @@
   appearance: none;
   width: 13px;
   height: 13px;
-  margin-top: -5.5px;
+  margin-top: -5px;
   border-radius: 999px;
   background: var(--color-chalk);
   border: 2px solid var(--color-ink);
-  box-shadow: 0 0 0 1px #55657a;
-  transition: transform 120ms ease;
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.45);
+  transition:
+    transform 140ms var(--ease-ui),
+    box-shadow 140ms ease;
 }
 .scrub::-moz-range-thumb {
   width: 13px;
@@ -89,20 +301,69 @@
   border-radius: 999px;
   background: var(--color-chalk);
   border: 2px solid var(--color-ink);
-  box-shadow: 0 0 0 1px #55657a;
-  transition: transform 120ms ease;
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.45);
+  transition:
+    transform 140ms var(--ease-ui),
+    box-shadow 140ms ease;
 }
 
 .scrub:hover::-webkit-slider-thumb,
 .scrub:focus-visible::-webkit-slider-thumb {
-  transform: scale(1.2);
+  transform: scale(1.22);
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.7), 0 0 14px -2px rgba(219, 227, 236, 0.7);
 }
 .scrub:hover::-moz-range-thumb,
 .scrub:focus-visible::-moz-range-thumb {
-  transform: scale(1.2);
+  transform: scale(1.22);
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.7), 0 0 14px -2px rgba(219, 227, 236, 0.7);
 }
 .scrub:focus-visible {
   outline: none;
+}
+
+/*
+ * The speed slider sits directly under the scrubber on the same grid, so it has to be legible as
+ * the *subordinate* of the pair or the eye will not know which one to grab. Same shape, one step
+ * quieter: thinner track, smaller thumb, haze instead of chalk until you touch it.
+ */
+.scrub--mini {
+  height: 1.125rem;
+}
+
+.scrub--mini::-webkit-slider-runnable-track {
+  height: 2px;
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.13));
+}
+.scrub--mini::-moz-range-track {
+  height: 2px;
+  background: linear-gradient(to right, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.13));
+}
+
+.scrub--mini::-webkit-slider-thumb {
+  width: 9px;
+  height: 9px;
+  margin-top: -3.5px;
+  background: var(--color-haze);
+  box-shadow: 0 0 0 1px rgba(125, 136, 150, 0.4);
+}
+.scrub--mini::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  background: var(--color-haze);
+  box-shadow: 0 0 0 1px rgba(125, 136, 150, 0.4);
+}
+
+.scrub--mini:hover::-webkit-slider-thumb,
+.scrub--mini:focus-visible::-webkit-slider-thumb {
+  background: var(--color-chalk);
+  transform: scale(1.2);
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.55), 0 0 10px -2px rgba(219, 227, 236, 0.6);
+}
+.scrub--mini:hover::-moz-range-thumb,
+.scrub--mini:focus-visible::-moz-range-thumb {
+  background: var(--color-chalk);
+  transform: scale(1.2);
+  box-shadow: 0 0 0 1px rgba(219, 227, 236, 0.55), 0 0 10px -2px rgba(219, 227, 236, 0.6);
 }
 
 /*

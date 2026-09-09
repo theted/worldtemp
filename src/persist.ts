@@ -15,6 +15,8 @@ export interface SavedState {
   month: number;
   /** ISO date the state was written, so a stale month can be refreshed. */
   savedOn: string;
+  /** Playback multiplier, 0.25–4. */
+  speed: number;
   relative: boolean;
   palette: string;
   labels: boolean;
@@ -39,6 +41,11 @@ export function loadState(): Partial<SavedState> | null {
     // rather than the whole state.
     if (!isFiniteTriple(parsed.camera)) delete parsed.camera;
     if (typeof parsed.month !== 'number' || !Number.isFinite(parsed.month)) delete parsed.month;
+    // A speed of 0 would look like a frozen app rather than a saved preference, and one from a
+    // future build with a wider range would drive the slider off its own track.
+    if (typeof parsed.speed !== 'number' || !(parsed.speed > 0 && parsed.speed <= 8)) {
+      delete parsed.speed;
+    }
     return parsed;
   } catch {
     return null;

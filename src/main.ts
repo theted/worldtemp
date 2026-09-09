@@ -4,7 +4,7 @@ import { initDataCache } from './cache';
 import { createGlobe, type Globe } from './globe';
 import { loadTerrain } from './terrain';
 import { loadElevation } from './elevation';
-import { mountUi } from './ui';
+import { mountUi, type UiHandle } from './ui';
 import { loadState, saveState, todayStamp } from './persist';
 
 const root = document.getElementById('app');
@@ -26,13 +26,13 @@ function fail(message: string, detail: unknown) {
 const SAVE_INTERVAL = 900;
 
 /**
- * Mirrors the globe's state into localStorage.
+ * Mirrors the globe's and the console's state into localStorage.
  *
  * Polling on a timer rather than reacting to every change: the camera moves continuously while you
  * orbit, so there is no discrete "changed" moment to hook, and writing on every frame would be
  * absurd. A snapshot comparison keeps it to one write per actual change.
  */
-function startPersisting(globe: Globe) {
+function startPersisting(globe: Globe, ui: UiHandle) {
   let lastSerialised = '';
 
   const snapshot = () => ({
@@ -48,6 +48,7 @@ function startPersisting(globe: Globe) {
     stars: globe.stars,
     height: globe.height,
     field: globe.field,
+    speed: ui.speed,
   });
 
   const flush = () => {
@@ -106,9 +107,14 @@ async function start() {
   // A month scrubbed on an earlier day is stale — this is a climatology, and the natural entry
   // point is the season you are actually in. Reloading the same day keeps exactly where you were.
   const sameDay = saved?.savedOn === todayStamp();
-  mountUi(root!, globe, field, sameDay ? saved?.month : undefined);
+  // Speed is a preference rather than a position, so unlike the month it survives the day rolling
+  // over — you set "slow" once because that is how you like to watch it, not because of the date.
+  const ui = mountUi(root!, globe, field, {
+    month: sameDay ? saved?.month : undefined,
+    speed: saved?.speed,
+  });
 
-  startPersisting(globe);
+  startPersisting(globe, ui);
 }
 
 start().catch((err) => fail('Could not start. Have you run `npm run data`?', err));

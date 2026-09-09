@@ -8,19 +8,55 @@ import { sunTimes, formatClock, formatDuration } from './sun';
 export { dateToMonth };
 
 /**
- * Chrome around the globe: title, legend, scrubber, layers panel, and the hover readout.
+ * Chrome around the globe: title, legend, transport, settings popover, and the hover readout.
  *
  * Every colour shown here comes from `ramp.ts`, the same module the shader samples, so the legend
  * is guaranteed to describe the picture rather than merely resemble it. That matters more now the
  * scale can move and the palette can change: with a relative window the legend's *numbers* are the
  * only thing telling you what a colour means.
+ *
+ * The stateful controls — segmented groups, toggle pills, palette swatches — carry their state in
+ * `aria-pressed` and let `style.css` do the painting. That keeps one fact in one place: there is no
+ * class string to forget to update alongside the attribute, and the accessible state and the
+ * visible state cannot drift apart.
  */
 
-/** Seconds for playback to traverse the full year. */
+/** Seconds for playback to traverse the full year at 1×. */
 const YEAR_SECONDS = 12;
 
 /** Slider resolution: hundredths of a month, fine enough that scrubbing reads as continuous. */
 const STEPS_PER_MONTH = 100;
+
+/**
+ * Playback speed runs on a log scale, ±2 octaves around 1×, so the slider spans a quarter speed to
+ * quadruple and — the point of the exercise — puts 1× exactly in the middle. On a linear mapping
+ * the neutral speed would sit a fifth of the way along and the whole upper half would be "faster
+ * than you ever want"; here half and double are the same distance from centre, which is how rate
+ * is actually perceived.
+ */
+const SPEED_STEPS = 100;
+const SPEED_OCTAVES = 2;
+const SPEED_MID = SPEED_STEPS / 2;
+/** Slider units either side of centre that snap to exactly 1× — a detent you can feel. */
+const SPEED_SNAP = 2;
+
+const speedFromSlider = (v: number) => 2 ** (((v - SPEED_MID) / SPEED_MID) * SPEED_OCTAVES);
+const sliderFromSpeed = (s: number) =>
+  Math.round(SPEED_MID + (Math.log2(s) / SPEED_OCTAVES) * SPEED_MID);
+
+const SPEED_MIN = speedFromSlider(0);
+const SPEED_MAX = speedFromSlider(SPEED_STEPS);
+
+/** What `mountUi` hands back, so the caller can persist what the UI owns. */
+export interface UiHandle {
+  /** Current playback multiplier. */
+  readonly speed: number;
+}
+
+export interface UiInitial {
+  month?: number | undefined;
+  speed?: number | undefined;
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -33,13 +69,21 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-const CHIP =
-  'rounded border border-edge px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
-  'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
-const CHIP_ON = 'bg-chalk/90 text-ink';
-const CHIP_OFF = 'text-haze hover:bg-white/5';
+/** A button whose only state is `aria-pressed`; everything visual follows from that. */
+function toggle(className: string, label: string, title?: string): HTMLButtonElement {
+  const b = el('button', className, label);
+  b.type = 'button';
+  b.setAttribute('aria-pressed', 'false');
+  if (title) b.title = title;
+  return b;
+}
 
-export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMonth?: number) {
+export function mountUi(
+  root: HTMLElement,
+  globe: Globe,
+  field: Field,
+  initial: UiInitial = {},
+): UiHandle {
   const { meta } = field;
   const months = meta.months;
 
@@ -72,14 +116,11 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   // ------------------------------------------------------------------------------------------
   // hover readout
   // ------------------------------------------------------------------------------------------
-  const tip = el(
-    'div',
-    'panel pointer-events-none absolute z-20 hidden rounded-md px-3 py-2 shadow-xl shadow-black/50',
-  );
+  const tip = el('div', 'panel pointer-events-none absolute z-20 hidden rounded-xl px-3 py-2.5');
   const tipTemp = el('div', 'flex items-baseline gap-2');
   const tipSwatch = el(
     'span',
-    'inline-block size-2.5 shrink-0 rounded-[2px] ring-1 ring-inset ring-white/15',
+    'inline-block size-2.5 shrink-0 rounded-[3px] ring-1 ring-inset ring-white/20',
   );
   const tipValue = el('span', 'text-[17px] leading-none tabular-nums text-chalk');
   tipTemp.append(tipSwatch, tipValue);
@@ -100,79 +141,86 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   root.appendChild(tip);
 
   // ------------------------------------------------------------------------------------------
-  // bottom console
+  // settings popover
   // ------------------------------------------------------------------------------------------
-  const console_ = el(
-    'div',
-    'absolute inset-x-0 bottom-0 z-10 flex justify-center p-4 md:p-6 pointer-events-none',
-  );
-  const panel = el(
-    'div',
-    'panel pointer-events-auto relative w-full max-w-xl rounded-lg px-5 py-4 shadow-2xl shadow-black/60',
-  );
 
-  // --- field + scale mode + layers button -------------------------------------------------------
-  const modeBtnClass =
-    'px-2 py-[3px] text-[9px] tracking-[0.16em] uppercase transition ' +
-    'focus-visible:outline focus-visible:outline-1 focus-visible:outline-haze';
-  const segmented = () =>
-    el('div', 'flex divide-x divide-edge overflow-hidden rounded border border-edge');
+  /**
+   * A segmented control: mutually exclusive options with one indicator that slides between them.
+   * The indicator is positioned from the pressed button's box, so the markup stays the source of
+   * truth for both geometry and state.
+   */
+  const segmented = (
+    defs: readonly { id: string; label: string; title?: string }[],
+  ): { root: HTMLElement; btns: { id: string; el: HTMLButtonElement }[] } => {
+    const wrap = el('div', 'seg');
+    const thumb = el('div', 'seg__thumb');
+    wrap.appendChild(thumb);
+    const btns = defs.map((d) => {
+      const b = toggle('seg__btn', d.label, d.title);
+      wrap.appendChild(b);
+      return { id: d.id, el: b };
+    });
+    return { root: wrap, btns };
+  };
 
-  // Which quantity is drawn is a bigger decision than how it is scaled, so it sits leftmost, in the
-  // same segmented shape rather than buried in the layers popover.
-  const fields = segmented();
-  const btnTemp = el('button', modeBtnClass, 'temp');
-  const btnDay = el('button', modeBtnClass, 'daylight');
-  btnTemp.type = 'button';
-  btnDay.type = 'button';
-  fields.append(btnTemp, btnDay);
+  const layoutSeg = (seg: HTMLElement) => {
+    const thumb = seg.querySelector<HTMLElement>('.seg__thumb');
+    const active = seg.querySelector<HTMLElement>('.seg__btn[aria-pressed="true"]');
+    if (!thumb || !active) return;
+    thumb.style.left = `${active.offsetLeft}px`;
+    thumb.style.width = `${active.offsetWidth}px`;
+  };
 
-  const modes = segmented();
-  const btnAbs = el('button', modeBtnClass, 'absolute');
-  const btnRel = el('button', modeBtnClass, 'relative');
-  btnAbs.type = 'button';
-  btnRel.type = 'button';
-  modes.append(btnAbs, btnRel);
+  // Which quantity is drawn is a bigger decision than how it is scaled, so it sits first.
+  const fieldSeg = segmented([
+    { id: 'temperature', label: 'temp', title: 'temperature  (D)' },
+    { id: 'daylight', label: 'daylight', title: 'hours of daylight  (D)' },
+  ]);
+  const modeSeg = segmented([
+    { id: 'absolute', label: 'absolute', title: 'pin the scale to the full range  (R)' },
+    { id: 'relative', label: 'relative', title: 'scale to what is on screen  (R)' },
+  ]);
 
-  // The console now carries only what is read continuously — what the colours mean, and when — so
-  // the caption states the two facts the moved controls used to imply: which quantity, which scale.
-  const legendCap = el('div', 'mb-1.5 flex items-center justify-between gap-3');
-  const legendField = el('span', 'label');
-  const legendNote = el('span', 'label');
-  legendCap.append(legendField, legendNote);
-
-  // --- settings panel ---------------------------------------------------------------------------
   const settings = el(
     'div',
-    'panel pointer-events-auto absolute right-0 top-full mt-2 hidden w-[19.5rem] ' +
-      'rounded-lg px-4 py-4 shadow-2xl shadow-black/70',
+    'panel pop pointer-events-auto absolute right-0 top-full mt-2.5 w-[21rem] rounded-xl px-4 py-4',
   );
+  settings.dataset.open = 'false';
 
-  const paletteRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
+  // Palettes show their own ramp. A row of words asks you to remember what "viridis" looks like;
+  // a row of gradients simply tells you, using the very stops the shader will sample.
+  const paletteRow = el('div', 'mt-2 grid grid-cols-4 gap-x-2.5 gap-y-3');
   const paletteBtns = PALETTES.map((p) => {
-    const b = el('button', `${CHIP} ${CHIP_OFF}`, p.label);
-    b.type = 'button';
+    const b = toggle('pal', '', p.label);
+    b.innerHTML = `<span class="pal__bar"></span><span class="pal__name">${p.label}</span>`;
+    const bar = b.querySelector<HTMLElement>('.pal__bar')!;
+    // A diverging ramp is drawn about its own midpoint here: the swatch describes the palette,
+    // not the current window, so pinning it to wherever 0 °C happens to fall would mislead.
+    bar.style.background = rampCss(p, 0.5);
     b.addEventListener('click', () => setPalette(p.id));
     paletteRow.appendChild(b);
     return { id: p.id, el: b };
   });
 
-  const showRow = el('div', 'mt-1.5 flex flex-wrap gap-1.5');
+  const showRow = el('div', 'mt-2 flex flex-wrap gap-1.5');
   // The 3-D layer is offered only when the sphere was actually built with the vertices to displace;
   // a control that cannot do anything is worse than no control.
   const layerDefs = (
     [
-      { key: 'labels', label: 'names' },
-      { key: 'borders', label: 'borders' },
-      { key: 'ocean', label: 'ocean' },
-      { key: 'relief', label: 'relief' },
-      ...(RELIEF_3D_ENABLED ? [{ key: 'height', label: '3d' } as const] : []),
-      { key: 'stars', label: 'stars' },
+      { key: 'labels', label: 'names', title: 'country names  (L)' },
+      { key: 'borders', label: 'borders', title: 'country borders  (B)' },
+      { key: 'ocean', label: 'ocean', title: 'colour-map the sea  (O)' },
+      { key: 'relief', label: 'relief', title: 'shaded relief' },
+      ...(RELIEF_3D_ENABLED ? [{ key: 'height', label: '3d', title: 'displace by elevation  (H)' } as const] : []),
+      { key: 'stars', label: 'stars', title: 'star field' },
     ] as const
-  ).slice() as readonly { key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars'; label: string }[];
+  ).slice() as readonly {
+    key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars';
+    label: string;
+    title: string;
+  }[];
   const layerBtns = layerDefs.map((d) => {
-    const b = el('button', `${CHIP} ${CHIP_OFF}`, d.label);
-    b.type = 'button';
+    const b = toggle('chip', d.label, d.title);
     b.addEventListener('click', () => setLayer(d.key, !globe[d.key]));
     showRow.appendChild(b);
     return { key: d.key, el: b };
@@ -180,26 +228,27 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
 
   /** A titled block. Ruled off from the one above, so the groups read as groups. */
   const section = (title: string, body: HTMLElement) => {
-    const wrap = el('div', 'mt-3.5 border-t border-edge/60 pt-3.5 first:mt-0 first:border-0 first:pt-0');
+    const wrap = el('div', 'mt-4 border-t border-edge/60 pt-4 first:mt-0 first:border-0 first:pt-0');
     wrap.append(el('div', 'label', title), body);
     return wrap;
   };
   const row = (child: HTMLElement) => {
-    const r = el('div', 'mt-1.5 flex');
+    const r = el('div', 'mt-2 flex');
     r.appendChild(child);
     return r;
   };
 
   settings.append(
-    section('field', row(fields)),
-    section('scale', row(modes)),
+    section('field', row(fieldSeg.root)),
+    section('scale', row(modeSeg.root)),
     section('palette', paletteRow),
     section('layers', showRow),
   );
 
   // --- settings button, top right ---------------------------------------------------------------
-  const ICON_COG = `<svg viewBox="0 0 24 24" class="size-[15px]" fill="none" stroke="currentColor"
-    stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  const ICON_COG = `<svg viewBox="0 0 24 24" class="size-[15px] transition-transform duration-300"
+    style="transition-timing-function: var(--ease-ui)"
+    fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="12" cy="12" r="3"/>
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33
       1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0
@@ -209,10 +258,12 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
       2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
   </svg>`;
   const gearClass = (open: boolean) =>
-    'grid size-9 place-items-center rounded-full border border-edge transition ' +
+    'grid size-9 place-items-center rounded-full border backdrop-blur-md transition ' +
     'focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 ' +
     'focus-visible:outline-haze ' +
-    (open ? 'bg-chalk/90 text-ink' : 'bg-ink/50 text-haze hover:text-chalk hover:bg-white/10');
+    (open
+      ? 'border-chalk/25 bg-chalk/[0.12] text-chalk [&>svg]:rotate-[60deg]'
+      : 'border-edge bg-ink/45 text-haze hover:border-chalk/20 hover:bg-white/[0.07] hover:text-chalk');
 
   const btnGear = el('button', gearClass(false), ICON_COG);
   btnGear.type = 'button';
@@ -223,11 +274,30 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   gearWrap.append(btnGear, settings);
   root.appendChild(gearWrap);
 
+  // ------------------------------------------------------------------------------------------
+  // bottom console
+  // ------------------------------------------------------------------------------------------
+  const console_ = el(
+    'div',
+    'absolute inset-x-0 bottom-0 z-10 flex justify-center p-4 md:p-6 pointer-events-none',
+  );
+  const panel = el(
+    'div',
+    'panel pointer-events-auto relative w-full max-w-xl rounded-2xl px-5 pb-3.5 pt-4',
+  );
+
+  // The console carries only what is read continuously — what the colours mean, and when — so the
+  // caption states the two facts the settings popover would otherwise hide: quantity, and scale.
+  const legendCap = el('div', 'mb-2 flex items-center justify-between gap-3');
+  const legendField = el('span', 'label');
+  const legendNote = el('span', 'label');
+  legendCap.append(legendField, legendNote);
+
   // --- legend bar -------------------------------------------------------------------------------
   const legend = el('div', 'mb-4');
   const barWrap = el(
     'div',
-    'relative h-2 w-full overflow-hidden rounded-[3px] ring-1 ring-inset ring-white/10',
+    'relative h-2.5 w-full overflow-hidden rounded-full ring-1 ring-inset ring-white/15',
   );
   const barFrom = el('div', 'absolute inset-0');
   const barTo = el('div', 'absolute inset-0');
@@ -235,10 +305,13 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   const zeroMark = el('div', 'absolute top-0 h-full w-px bg-white opacity-0 mix-blend-difference');
   barWrap.append(barFrom, barTo, zeroMark);
 
-  const ticks = el('div', 'relative mt-1.5 h-3');
+  const ticks = el('div', 'relative mt-2 h-3');
   const TICK_POS = [0, 0.25, 0.5, 0.75, 1];
   const tickEls = TICK_POS.map((pos) => {
-    const t = el('span', 'absolute -translate-x-1/2 text-[9px] tabular-nums text-haze/70');
+    const t = el(
+      'span',
+      'absolute -translate-x-1/2 text-[9px] tabular-nums text-haze/70 transition-opacity',
+    );
     t.style.left = `${pos * 100}%`;
     ticks.appendChild(t);
     return t;
@@ -252,20 +325,26 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   legend.append(legendCap, barWrap, ticks);
 
   // --- transport --------------------------------------------------------------------------------
-  const transport = el('div', 'flex items-center gap-4');
+  // One grid template shared with the speed row below, so the play button, scrubber and date line
+  // up with the gauge, speed slider and multiplier. The rows rhyme instead of merely stacking.
+  const ROW = 'grid grid-cols-[2.25rem_1fr_4.5rem] items-center gap-x-4';
+  const transport = el('div', ROW);
 
+  // The one filled element on the page. Everything else in the chrome is an outline or a hairline,
+  // which leaves exactly one thing reading as *the* thing to press.
   const play = el(
     'button',
-    'grid size-9 shrink-0 place-items-center rounded-full border border-edge bg-white/[0.04] ' +
-      'text-chalk transition hover:bg-white/10 focus-visible:outline focus-visible:outline-1 ' +
-      'focus-visible:outline-offset-2 focus-visible:outline-haze',
+    'grid size-9 place-items-center rounded-full bg-chalk/90 text-ink transition ' +
+      'hover:bg-chalk hover:shadow-[0_0_22px_-4px_rgba(219,227,236,0.75)] active:scale-95 ' +
+      'focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 ' +
+      'focus-visible:outline-chalk',
   );
   play.type = 'button';
 
   const ICON_PLAY = `<svg viewBox="0 0 16 16" class="size-3.5 translate-x-px" fill="currentColor"><path d="M4 2.5v11l9-5.5z"/></svg>`;
   const ICON_PAUSE = `<svg viewBox="0 0 16 16" class="size-3.5" fill="currentColor"><rect x="4" y="2.5" width="3" height="11" rx="1"/><rect x="9" y="2.5" width="3" height="11" rx="1"/></svg>`;
 
-  const scrubWrap = el('div', 'min-w-0 flex-1');
+  const scrubWrap = el('div', 'min-w-0');
   const scrub = el('input', 'scrub');
   scrub.type = 'range';
   scrub.min = '0';
@@ -286,13 +365,40 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   }
   scrubWrap.append(scrub, monthMarks);
 
-  const dateOut = el('div', 'w-[4.5rem] shrink-0 text-right');
+  const dateOut = el('div', 'text-right');
   const dateBig = el('div', 'text-[15px] leading-none tabular-nums text-chalk');
   const dateSub = el('div', 'label mt-1', 'climatology');
   dateOut.append(dateBig, dateSub);
 
   transport.append(play, scrubWrap, dateOut);
-  panel.append(legend, transport);
+
+  // --- playback speed ---------------------------------------------------------------------------
+  const ICON_GAUGE = `<svg viewBox="0 0 16 16" class="size-[15px]" fill="none" stroke="currentColor"
+    stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.7 12.3a6.3 6.3 0 1 1 10.6 0"/>
+    <path d="M8 12.3 11 7.4"/>
+  </svg>`;
+  const speedRow = el('div', `${ROW} mt-3 border-t border-edge/60 pt-3`);
+  const gauge = el('div', 'grid size-9 place-items-center text-haze', ICON_GAUGE);
+  gauge.title = 'playback speed  ( [ and ] )';
+
+  const speedWrap = el('div', 'min-w-0');
+  const speedInput = el('input', 'scrub scrub--mini');
+  speedInput.type = 'range';
+  speedInput.min = '0';
+  speedInput.max = String(SPEED_STEPS);
+  speedInput.step = '1';
+  speedInput.setAttribute('aria-label', 'playback speed');
+  speedWrap.appendChild(speedInput);
+
+  const speedOut = el('div', 'text-right');
+  const speedBig = el('div', 'text-[13px] leading-none tabular-nums text-chalk/90');
+  const speedSub = el('div', 'label mt-1', 'speed');
+  speedOut.append(speedBig, speedSub);
+
+  speedRow.append(gauge, speedWrap, speedOut);
+
+  panel.append(legend, transport, speedRow);
   console_.appendChild(panel);
   root.appendChild(console_);
 
@@ -300,6 +406,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   // behaviour
   // ------------------------------------------------------------------------------------------
   let playing = false;
+  let speed = 1;
   let last = performance.now();
 
   const setMonth = (m: number) => {
@@ -316,13 +423,38 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     last = performance.now();
   };
 
+  /**
+   * `fromSlider` says the input element already holds the value, so writing it back would fight
+   * the pointer mid-drag on engines that clamp during input.
+   */
+  const setSpeed = (value: number, fromSlider = false) => {
+    speed = Math.min(Math.max(value, SPEED_MIN), SPEED_MAX);
+    // Always two decimals: the readout is an instrument, and a number that changes width as it
+    // ticks is the one thing tabular figures exist to prevent.
+    speedBig.textContent = `${speed.toFixed(2)}×`;
+    if (!fromSlider) speedInput.value = String(sliderFromSpeed(speed));
+  };
+
+  const readSpeedSlider = () => {
+    let v = Number(speedInput.value);
+    // A detent at the centre: without it, landing on exactly 1× by dragging is luck.
+    if (Math.abs(v - SPEED_MID) <= SPEED_SNAP) {
+      v = SPEED_MID;
+      speedInput.value = String(v);
+    }
+    setSpeed(speedFromSlider(v), true);
+  };
+
+  const nudgeSpeed = (steps: number) => {
+    speedInput.value = String(Math.min(Math.max(Number(speedInput.value) + steps, 0), SPEED_STEPS));
+    readSpeedSlider();
+  };
+
   const setField = (id: 'temperature' | 'daylight') => {
     globe.field = id;
     const day = id === 'daylight';
-    btnTemp.className = `${modeBtnClass} ${day ? CHIP_OFF : CHIP_ON}`;
-    btnDay.className = `${modeBtnClass} ${day ? CHIP_ON : CHIP_OFF}`;
-    btnTemp.setAttribute('aria-pressed', String(!day));
-    btnDay.setAttribute('aria-pressed', String(day));
+    for (const b of fieldSeg.btns) b.el.setAttribute('aria-pressed', String(b.id === id));
+    layoutSeg(fieldSeg.root);
     // One word, because the box under the date is 4.5rem wide and two would wrap.
     dateSub.textContent = day ? 'astronomy' : 'climatology';
     legendField.textContent = day ? 'hours of daylight' : 'temperature °C';
@@ -333,19 +465,15 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
 
   const setRelative = (on: boolean) => {
     globe.relative = on;
-    btnAbs.className = `${modeBtnClass} ${on ? CHIP_OFF : CHIP_ON}`;
-    btnRel.className = `${modeBtnClass} ${on ? CHIP_ON : CHIP_OFF}`;
-    btnAbs.setAttribute('aria-pressed', String(!on));
-    btnRel.setAttribute('aria-pressed', String(on));
+    const id = on ? 'relative' : 'absolute';
+    for (const b of modeSeg.btns) b.el.setAttribute('aria-pressed', String(b.id === id));
+    layoutSeg(modeSeg.root);
     legendNote.textContent = on ? 'scaled to view' : 'full range';
   };
 
   function setPalette(id: string) {
     globe.palette = id;
-    for (const b of paletteBtns) {
-      b.el.className = `${CHIP} ${b.id === id ? CHIP_ON : CHIP_OFF}`;
-      b.el.setAttribute('aria-pressed', String(b.id === id));
-    }
+    for (const b of paletteBtns) b.el.setAttribute('aria-pressed', String(b.id === id));
   }
 
   function setLayer(
@@ -353,27 +481,25 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     on: boolean,
   ) {
     globe[key] = on;
-    const b = layerBtns.find((x) => x.key === key);
-    if (b) {
-      b.el.className = `${CHIP} ${on ? CHIP_ON : CHIP_OFF}`;
-      b.el.setAttribute('aria-pressed', String(on));
-    }
+    layerBtns.find((x) => x.key === key)?.el.setAttribute('aria-pressed', String(on));
   }
 
   const setSettingsOpen = (open: boolean) => {
-    settings.classList.toggle('hidden', !open);
+    settings.dataset.open = String(open);
     btnGear.className = gearClass(open);
     btnGear.setAttribute('aria-expanded', String(open));
   };
 
   play.addEventListener('click', () => setPlaying(!playing));
-  btnTemp.addEventListener('click', () => setField('temperature'));
-  btnDay.addEventListener('click', () => setField('daylight'));
-  btnAbs.addEventListener('click', () => setRelative(false));
-  btnRel.addEventListener('click', () => setRelative(true));
+  for (const b of fieldSeg.btns) {
+    b.el.addEventListener('click', () => setField(b.id as 'temperature' | 'daylight'));
+  }
+  for (const b of modeSeg.btns) {
+    b.el.addEventListener('click', () => setRelative(b.id === 'relative'));
+  }
   btnGear.addEventListener('click', (e) => {
     e.stopPropagation();
-    setSettingsOpen(settings.classList.contains('hidden'));
+    setSettingsOpen(settings.dataset.open !== 'true');
   });
   settings.addEventListener('click', (e) => e.stopPropagation());
   // Anywhere else — including the globe — dismisses it.
@@ -382,6 +508,16 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   // Grabbing the scrubber is an unambiguous request to take manual control.
   scrub.addEventListener('pointerdown', () => setPlaying(false));
   scrub.addEventListener('input', () => setMonth(Number(scrub.value) / STEPS_PER_MONTH));
+  speedInput.addEventListener('input', readSpeedSlider);
+
+  // The segmented indicators are measured from live layout, so they have to be re-measured whenever
+  // that layout could have changed. Metrics-driven positioning is the price of a sliding thumb.
+  const layoutSegs = () => {
+    layoutSeg(fieldSeg.root);
+    layoutSeg(modeSeg.root);
+  };
+  window.addEventListener('resize', layoutSegs);
+  document.fonts?.ready.then(layoutSegs).catch(() => {});
 
   window.addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement && e.key !== ' ') return;
@@ -400,6 +536,10 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
       setLayer('height', !globe.height);
     } else if (e.key === 'd' || e.key === 'D') {
       setField(globe.field === 'daylight' ? 'temperature' : 'daylight');
+    } else if (e.key === '[') {
+      nudgeSpeed(-5);
+    } else if (e.key === ']') {
+      nudgeSpeed(5);
     } else if (e.key === 'Escape') {
       setSettingsOpen(false);
     } else if (e.key === 'ArrowRight') {
@@ -479,7 +619,7 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
     requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.25);
     last = now;
-    if (playing) setMonth(globe.month + (dt * months) / YEAR_SECONDS);
+    if (playing) setMonth(globe.month + (dt * months * speed) / YEAR_SECONDS);
 
     paintLegend();
 
@@ -544,10 +684,17 @@ export function mountUi(root: HTMLElement, globe: Globe, field: Field, initialMo
   };
 
   setPlaying(false);
+  setSpeed(initial.speed ?? 1);
   setField(globe.field);
   setRelative(globe.relative);
   setPalette(paletteById(globe.palette).id);
   for (const d of layerDefs) setLayer(d.key, globe[d.key]);
-  setMonth(initialMonth ?? dateToMonth(new Date(), months));
+  setMonth(initial.month ?? dateToMonth(new Date(), months));
   requestAnimationFrame(frame);
+
+  return {
+    get speed() {
+      return speed;
+    },
+  };
 }
