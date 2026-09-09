@@ -415,9 +415,101 @@ src/elevation.ts        real heights, for displacement — the hillshade is a de
 src/cache.ts            the rasters in Cache Storage, keyed by a digest of the build that wrote them
 src/persist.ts          camera and settings in localStorage, with every access guarded
 src/ui.ts               masthead, legend, transport, tooltip
+.github/workflows/      build and publish to S3 on every push to master
 ```
 
 `npm run data` finishes by checking known values (Sahara in July, Siberia in January, the equatorial
 Pacific) against the composited field. These are georeferencing tests: a wrong longitude roll on the
 ocean grid is invisible in summary statistics but lays the Pacific on top of Africa, and the checks
 fail loudly when it does.
+
+## Deploying
+
+`.github/workflows/deploy.yml` builds on every push to `master` and syncs `dist/` to S3, then
+invalidates CloudFront if a distribution id is configured. CI never runs `npm run data` — that
+needs about 2 GB of raw WorldClim, NOAA and Natural Earth downloads which are gitignored. The
+*baked* rasters under `public/data` are committed instead, so refreshing the climatology means
+running `npm run data` locally and committing the PNGs it writes.
+
+The bundle is uploaded in three passes, because its two halves want opposite cache policies.
+
+| | |
+|---|---|
+| `assets/*` | `max-age=31536000, immutable` |
+| `index.html`, `data/*`, `geo/*` | `max-age=0, must-revalidate` |
+
+Vite fingerprints everything under `assets/`, so those URLs can never mean two different things and
+they get the maximum. The rasters are the interesting case: they are 9.5 MB and they never change
+between builds, which sounds like the textbook argument for a long TTL, and it is wrong here. The
+app caches them itself in Cache Storage under a key derived from `meta.json`'s digest, so a reload
+already costs no download; an HTTP cache permitted to serve a stale PNG would let a *new* cache
+generation be filled with *old* pixels, which is the one failure that whole scheme exists to make
+impossible. Revalidation costs a 304. Staleness costs a globe that is quietly wrong.
+
+The pass ordering matters for the same reason: new assets go up *before* the new `index.html`, and
+the superseded ones are swept *after* it, so there is never a moment when the published HTML points
+at a bundle that is not there.
+
+### Secrets
+
+Set these under **Settings → Secrets and variables → Actions**:
+
+| secret | |
+|---|---|
+| `AWS_ACCESS_KEY_ID` | deploy user's key |
+| `AWS_SECRET_ACCESS_KEY` | deploy user's secret |
+| `AWS_REGION` | the bucket's region, e.g. `eu-north-1` |
+| `S3_BUCKET` | bucket name, no `s3://` |
+| `CLOUDFRONT_DISTRIBUTION_ID` | optional; the invalidation step is skipped without it |
+
+### AWS, once
+
+CloudFront is not optional if the site is to be served as `https://world.sundbergsolutions.se` — an
+S3 website endpoint speaks plain HTTP only, and a WebGL globe that fetches 10 MB of rasters over
+plain HTTP loses Cache Storage as well, since it needs a secure context.
+
+```bash
+BUCKET=world.sundbergsolutions.se
+REGION=eu-north-1
+
+# 1. Bucket. No website hosting, no public access — CloudFront reaches it through an
+#    origin access control, so the bucket itself never needs to be readable from the internet.
+aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"   --create-bucket-configuration LocationConstraint="$REGION"
+
+# 2. Certificate. Must be in us-east-1 whatever the bucket's region — CloudFront only
+#    reads certificates from there. Then add the CNAME it asks for to validate.
+aws acm request-certificate --region us-east-1   --domain-name world.sundbergsolutions.se --validation-method DNS
+```
+
+Then, in the CloudFront console: create a distribution with that bucket as origin, **Origin access
+control** (letting it update the bucket policy for you), **Redirect HTTP to HTTPS**, the
+`CachingOptimized` managed cache policy, **Compress objects automatically** on, default root object
+`index.html`, and `world.sundbergsolutions.se` as an alternate domain name with the certificate
+above.
+
+Compression is worth checking rather than assuming: it takes the JS bundle from 611 kB to about
+160 kB and the TopoJSON from 112 kB to about 30 kB. It does nothing for the PNGs, which are already
+compressed.
+
+Finally, an IAM user for the workflow with exactly this policy and nothing more:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::world.sundbergsolutions.se" },
+    { "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::world.sundbergsolutions.se/*" },
+    { "Effect": "Allow",
+      "Action": ["cloudfront:CreateInvalidation"],
+      "Resource": "arn:aws:cloudfront::ACCOUNT_ID:distribution/DISTRIBUTION_ID" }
+  ]
+}
+```
+
+### DNS
+
+One record, `world` in `sundbergsolutions.se`, `CNAME` to the distribution's `d111111abcdef8.cloudfront.net`.
