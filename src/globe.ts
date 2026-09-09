@@ -276,6 +276,41 @@ const OPENING_LAT = 45;
  */
 const OPENING_FILL = 0.92;
 
+/**
+ * The opening move: the globe eases in from further out, so the page arrives at Europe rather
+ * than cutting to it.
+ *
+ * The distance is interpolated in *log* space — `settled · FROM^(1-k)` — because equal steps in
+ * distance are not equal steps in apparent zoom. Interpolating the raw number makes the approach
+ * look like it slams on the brakes at the end however gentle the easing curve is; interpolating
+ * the ratio gives a constant perceived rate, so the curve you pick is the curve you see.
+ */
+const INTRO_SECONDS = 2.4;
+const INTRO_FROM = 2.9;
+
+/**
+ * Ease-out with a whisper of overshoot, so the globe arrives and settles rather than stopping
+ * dead against a wall. `s` is the overshoot strength; it is small on purpose, because the log
+ * interpolation multiplies whatever it does here by the whole zoom range.
+ */
+const easeOutBack = (t: number, s = 0.22) => {
+  const u = t - 1;
+  return 1 + (s + 1) * u * u * u + s * u * u;
+};
+
+/**
+ * Soft zoom stops, and the spring that enforces them.
+ *
+ * OrbitControls' own damping is an exponential decay toward a target, which cannot overshoot —
+ * so it can glide, but it can never bounce. The stops it is given below are deliberately wider
+ * than these, leaving a band the camera may be pulled into; this spring then pulls it back.
+ * `SPRING_D` sits below critical damping (2·√SPRING_K ≈ 27.6), and that gap is the bounce.
+ */
+const DIST_MIN = 1.25;
+const DIST_MAX = 6;
+const SPRING_K = 190;
+const SPRING_D = 17;
+
 export interface Globe {
   /** Continuous position in the year, 0 = mid-January, wrapping at 12. */
   month: number;
@@ -356,12 +391,30 @@ export function createGlobe(
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.06;
+  // Lower than it was: the delta decays more slowly, so a flick keeps gliding instead of arriving
+  // and stopping. Paired with the rubber band below, movement reads as momentum rather than input.
+  controls.dampingFactor = 0.048;
   controls.rotateSpeed = 0.42;
   controls.enablePan = false;
-  controls.minDistance = 1.25;
-  controls.maxDistance = 6;
+  // Wider than the soft stops on purpose — this is the slack the rubber band is allowed to use.
+  // OrbitControls clamps the radius inside its own update(), so anything tighter here would flatten
+  // the overshoot before the spring ever saw it.
+  controls.minDistance = DIST_MIN - 0.12;
+  controls.maxDistance = DIST_MAX + 0.7;
   controls.zoomSpeed = 0.7;
+
+  /** Distance at which the globe sits framed. The intro eases in to it; the spring defends it. */
+  let settledDist = camera.position.length() || 2.6;
+  /** 0→1 across the opening move. Reaching 1 hands the distance back to the controls. */
+  let intro = 0;
+  /** Radial velocity carried by the rubber band, in world units per second. */
+  let distVel = 0;
+
+  // Touching the globe mid-intro ends it. Nothing snaps: the intro only *writes* the distance
+  // while it is running, so stopping it simply leaves the camera wherever it had reached.
+  controls.addEventListener('start', () => {
+    intro = 1;
+  });
 
   // Palette textures are built once and kept; switching is a cross-fade between two of them.
   const rampTextures = new Map<string, THREE.DataTexture>();
@@ -477,7 +530,12 @@ export function createGlobe(
   const frameGlobe = () => {
     const fovV = THREE.MathUtils.degToRad(camera.fov);
     const fovH = 2 * Math.atan(Math.tan(fovV / 2) * camera.aspect);
-    camera.position.setLength(1 / Math.sin(Math.min(fovV, fovH) / 2) / OPENING_FILL);
+    settledDist = 1 / Math.sin(Math.min(fovV, fovH) / 2) / OPENING_FILL;
+    // Applied unconditionally even though the intro overwrites it on every frame it runs. The
+    // camera starts life at radius 1 — on the surface — and a viewer who grabs the globe before
+    // the first frame ends the intro before it has written anything, so there has to be a sane
+    // distance standing here already.
+    camera.position.setLength(settledDist);
   };
 
   const resize = () => {
@@ -601,6 +659,22 @@ export function createGlobe(
     stars.update(elapsed);
     if (countries) countries.lines.visible = api.borders;
     controls.update();
+
+    if (intro < 1) {
+      intro = Math.min(1, intro + dt / INTRO_SECONDS);
+      camera.position.setLength(settledDist * INTRO_FROM ** (1 - easeOutBack(intro)));
+    } else {
+      // Rubber band. `over` is signed, so one expression handles both stops: positive pushes the
+      // camera back out of the globe, negative pulls it back in from the void.
+      const d = camera.position.length();
+      const over = d < DIST_MIN ? DIST_MIN - d : d > DIST_MAX ? DIST_MAX - d : 0;
+      if (over !== 0 || Math.abs(distVel) > 1e-4) {
+        distVel += (over * SPRING_K - distVel * SPRING_D) * dt;
+        camera.position.setLength(
+          THREE.MathUtils.clamp(d + distVel * dt, DIST_MIN - 0.12, DIST_MAX + 0.7),
+        );
+      }
+    }
 
     modeBlend += ((api.relative ? 1 : 0) - modeBlend) * ease;
 

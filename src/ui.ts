@@ -47,6 +47,16 @@ const sliderFromSpeed = (s: number) =>
 const SPEED_MIN = speedFromSlider(0);
 const SPEED_MAX = speedFromSlider(SPEED_STEPS);
 
+/**
+ * How long the chrome stays up after you stop reaching for it, and how far outside the panel
+ * still counts as reaching. The margin is generous because the alternative — controls that
+ * vanish while your hand is on the way to them — is far worse than ones that linger.
+ */
+const CHROME_HOLD_MS = 2600;
+const REVEAL_MARGIN = 130;
+/** Longer on arrival: the controls introduce themselves before withdrawing. */
+const CHROME_INTRO_MS = 3600;
+
 /** What `mountUi` hands back, so the caller can persist what the UI owns. */
 export interface UiHandle {
   /** Current playback multiplier. */
@@ -202,6 +212,24 @@ export function mountUi(
     return { id: p.id, el: b };
   });
 
+  // Playback rate lives with the other settings: it is chosen once and then left alone, unlike the
+  // scrubber beside it in the console, which is handled continuously.
+  const speedRow = el('div', 'mt-2 flex items-center gap-3');
+  const speedWrap = el('div', 'min-w-0 flex-1');
+  const speedInput = el('input', 'scrub scrub--mini');
+  speedInput.type = 'range';
+  speedInput.min = '0';
+  speedInput.max = String(SPEED_STEPS);
+  speedInput.step = '1';
+  speedInput.title = 'playback speed  ( [ and ] )';
+  speedInput.setAttribute('aria-label', 'playback speed');
+  speedWrap.appendChild(speedInput);
+  const speedBig = el(
+    'div',
+    'w-[3.1rem] shrink-0 text-right text-[11px] leading-none tabular-nums text-chalk/90',
+  );
+  speedRow.append(speedWrap, speedBig);
+
   const showRow = el('div', 'mt-2 flex flex-wrap gap-1.5');
   // The 3-D layer is offered only when the sphere was actually built with the vertices to displace;
   // a control that cannot do anything is worse than no control.
@@ -241,6 +269,7 @@ export function mountUi(
   settings.append(
     section('field', row(fieldSeg.root)),
     section('scale', row(modeSeg.root)),
+    section('playback', speedRow),
     section('palette', paletteRow),
     section('layers', showRow),
   );
@@ -270,7 +299,13 @@ export function mountUi(
   btnGear.setAttribute('aria-label', 'settings');
   btnGear.setAttribute('aria-expanded', 'false');
 
-  const gearWrap = el('div', 'pointer-events-auto absolute right-6 top-6 z-30 md:right-8 md:top-8');
+  const gearWrap = el(
+    'div',
+    'chrome pointer-events-auto absolute right-6 top-6 z-30 md:right-8 md:top-8',
+  );
+  gearWrap.dataset.shown = 'true';
+  // It withdraws upward, away from the globe, where the console withdraws downward.
+  gearWrap.style.setProperty('--chrome-out', '-10px');
   gearWrap.append(btnGear, settings);
   root.appendChild(gearWrap);
 
@@ -279,11 +314,12 @@ export function mountUi(
   // ------------------------------------------------------------------------------------------
   const console_ = el(
     'div',
-    'absolute inset-x-0 bottom-0 z-10 flex justify-center p-4 md:p-6 pointer-events-none',
+    'chrome absolute inset-x-0 bottom-0 z-10 flex justify-center p-4 md:p-6 pointer-events-none',
   );
+  console_.dataset.shown = 'true';
   const panel = el(
     'div',
-    'panel pointer-events-auto relative w-full max-w-xl rounded-2xl px-5 pb-3.5 pt-4',
+    'panel pointer-events-auto relative w-full max-w-xl rounded-2xl px-5 py-4',
   );
 
   // The console carries only what is read continuously — what the colours mean, and when — so the
@@ -325,10 +361,7 @@ export function mountUi(
   legend.append(legendCap, barWrap, ticks);
 
   // --- transport --------------------------------------------------------------------------------
-  // One grid template shared with the speed row below, so the play button, scrubber and date line
-  // up with the gauge, speed slider and multiplier. The rows rhyme instead of merely stacking.
-  const ROW = 'grid grid-cols-[2.25rem_1fr_4.5rem] items-center gap-x-4';
-  const transport = el('div', ROW);
+  const transport = el('div', 'flex items-center gap-4');
 
   // The one filled element on the page. Everything else in the chrome is an outline or a hairline,
   // which leaves exactly one thing reading as *the* thing to press.
@@ -344,7 +377,7 @@ export function mountUi(
   const ICON_PLAY = `<svg viewBox="0 0 16 16" class="size-3.5 translate-x-px" fill="currentColor"><path d="M4 2.5v11l9-5.5z"/></svg>`;
   const ICON_PAUSE = `<svg viewBox="0 0 16 16" class="size-3.5" fill="currentColor"><rect x="4" y="2.5" width="3" height="11" rx="1"/><rect x="9" y="2.5" width="3" height="11" rx="1"/></svg>`;
 
-  const scrubWrap = el('div', 'min-w-0');
+  const scrubWrap = el('div', 'min-w-0 flex-1');
   const scrub = el('input', 'scrub');
   scrub.type = 'range';
   scrub.min = '0';
@@ -365,40 +398,14 @@ export function mountUi(
   }
   scrubWrap.append(scrub, monthMarks);
 
-  const dateOut = el('div', 'text-right');
+  const dateOut = el('div', 'w-[4.5rem] shrink-0 text-right');
   const dateBig = el('div', 'text-[15px] leading-none tabular-nums text-chalk');
   const dateSub = el('div', 'label mt-1', 'climatology');
   dateOut.append(dateBig, dateSub);
 
   transport.append(play, scrubWrap, dateOut);
 
-  // --- playback speed ---------------------------------------------------------------------------
-  const ICON_GAUGE = `<svg viewBox="0 0 16 16" class="size-[15px]" fill="none" stroke="currentColor"
-    stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M2.7 12.3a6.3 6.3 0 1 1 10.6 0"/>
-    <path d="M8 12.3 11 7.4"/>
-  </svg>`;
-  const speedRow = el('div', `${ROW} mt-3 border-t border-edge/60 pt-3`);
-  const gauge = el('div', 'grid size-9 place-items-center text-haze', ICON_GAUGE);
-  gauge.title = 'playback speed  ( [ and ] )';
-
-  const speedWrap = el('div', 'min-w-0');
-  const speedInput = el('input', 'scrub scrub--mini');
-  speedInput.type = 'range';
-  speedInput.min = '0';
-  speedInput.max = String(SPEED_STEPS);
-  speedInput.step = '1';
-  speedInput.setAttribute('aria-label', 'playback speed');
-  speedWrap.appendChild(speedInput);
-
-  const speedOut = el('div', 'text-right');
-  const speedBig = el('div', 'text-[13px] leading-none tabular-nums text-chalk/90');
-  const speedSub = el('div', 'label mt-1', 'speed');
-  speedOut.append(speedBig, speedSub);
-
-  speedRow.append(gauge, speedWrap, speedOut);
-
-  panel.append(legend, transport, speedRow);
+  panel.append(legend, transport);
   console_.appendChild(panel);
   root.appendChild(console_);
 
@@ -521,6 +528,9 @@ export function mountUi(
 
   window.addEventListener('keydown', (e) => {
     if (e.target instanceof HTMLInputElement && e.key !== ' ') return;
+    // Every shortcut below changes something the console displays. Showing it is how the
+    // keyboard user sees that the key landed.
+    nudgeChrome();
     if (e.key === ' ') {
       e.preventDefault();
       setPlaying(!playing);
@@ -559,6 +569,51 @@ export function mountUi(
     px = e.clientX;
     py = e.clientY;
   });
+
+  // ------------------------------------------------------------------------------------------
+  // the chrome withdraws
+  // ------------------------------------------------------------------------------------------
+
+  /**
+   * Whether the pointer is close enough to an element to count as reaching for it.
+   *
+   * Deliberately geometric rather than `:hover`. Hover would need the panel hit-testable to be
+   * detected, and a hit-testable panel is exactly what must not exist while it is invisible — it
+   * would eat every globe drag across the bottom of the window. A rect stays measurable at zero
+   * opacity, so this reads the same either way.
+   */
+  const reaching = (node: HTMLElement) => {
+    const r = node.getBoundingClientRect();
+    return (
+      px >= r.left - REVEAL_MARGIN &&
+      px <= r.right + REVEAL_MARGIN &&
+      py >= r.top - REVEAL_MARGIN &&
+      py <= r.bottom + REVEAL_MARGIN
+    );
+  };
+
+  let chromeShown = true;
+  let holdUntil = performance.now() + CHROME_INTRO_MS;
+  /** Any deliberate act — a tap, a keypress — puts the controls back up for a while. */
+  const nudgeChrome = () => {
+    holdUntil = performance.now() + CHROME_HOLD_MS;
+  };
+  root.addEventListener('pointerdown', nudgeChrome);
+
+  const updateChrome = (now: number) => {
+    const focus = document.activeElement;
+    const shown =
+      settings.dataset.open === 'true' ||
+      now < holdUntil ||
+      // Keyboard users never move the pointer, so focus alone has to be able to hold it open.
+      (focus instanceof HTMLElement && (console_.contains(focus) || gearWrap.contains(focus))) ||
+      reaching(panel) ||
+      reaching(btnGear);
+    if (shown === chromeShown) return;
+    chromeShown = shown;
+    console_.dataset.shown = String(shown);
+    gearWrap.dataset.shown = String(shown);
+  };
 
   /**
    * Repaints the legend from the globe's current colour window and palette.
@@ -621,6 +676,7 @@ export function mountUi(
     last = now;
     if (playing) setMonth(globe.month + (dt * months * speed) / YEAR_SECONDS);
 
+    updateChrome(now);
     paintLegend();
 
     const h = globe.hover;

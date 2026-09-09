@@ -94,6 +94,31 @@
 }
 
 /*
+ * The chrome withdraws when you are not reaching for it, so the globe gets the whole window.
+ *
+ * Both halves of the hidden state matter. Opacity alone leaves the panel hit-testable, so an
+ * invisible console would keep swallowing drags across the bottom of the screen; and
+ * `pointer-events: none` on the wrapper is not enough either, because the panel inside sets
+ * `pointer-events: auto` and a child may opt back in however its parent is set. The descendant
+ * selector is what actually makes the thing inert.
+ */
+.chrome {
+  transition:
+    opacity 380ms ease,
+    transform 560ms var(--ease-ui);
+}
+
+.chrome[data-shown='false'] {
+  opacity: 0;
+  transform: translateY(var(--chrome-out, 14px));
+}
+
+.chrome[data-shown='false'],
+.chrome[data-shown='false'] * {
+  pointer-events: none;
+}
+
+/*
  * Segmented control — one of a set. The indicator is a single element that slides between the
  * options rather than a background that blinks on and off: the movement itself says the choices
  * are alternatives on one axis, which is exactly what "absolute / relative" is.
