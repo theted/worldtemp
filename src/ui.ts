@@ -1,5 +1,5 @@
 import type { Field } from './field';
-import { OCEAN_MUTED_CSS, RELIEF_3D_ENABLED, type Globe } from './globe';
+import { seaToneCss, RELIEF_3D_ENABLED, type Globe, type SeaTone } from './globe';
 import { monthToDayOfYear, monthToDateLabel, dateToMonth } from './calendar';
 import { rampCss, blendedCss, zeroPosition, PALETTES, paletteById } from './ramp';
 import { formatLonLat } from './geo';
@@ -190,6 +190,13 @@ export function mountUi(
     { id: 'absolute', label: 'absolute', title: 'pin the scale to the full range  (R)' },
     { id: 'relative', label: 'relative', title: 'scale to what is on screen  (R)' },
   ]);
+  // The sea is one decision with three answers rather than a switch plus a tone setting: a tone
+  // control that did nothing whenever the switch was on would be worse than no control.
+  const seaSeg = segmented([
+    { id: 'mapped', label: 'mapped', title: 'colour-map the sea  (O)' },
+    { id: 'blue', label: 'blue', title: 'flat sea blue  (O)' },
+    { id: 'grey', label: 'grey', title: 'flat neutral grey  (O)' },
+  ]);
 
   const settings = el(
     'div',
@@ -237,13 +244,12 @@ export function mountUi(
     [
       { key: 'labels', label: 'names', title: 'country names  (L)' },
       { key: 'borders', label: 'borders', title: 'country borders  (B)' },
-      { key: 'ocean', label: 'ocean', title: 'colour-map the sea  (O)' },
       { key: 'relief', label: 'relief', title: 'shaded relief' },
       ...(RELIEF_3D_ENABLED ? [{ key: 'height', label: '3d', title: 'displace by elevation  (H)' } as const] : []),
       { key: 'stars', label: 'stars', title: 'star field' },
     ] as const
   ).slice() as readonly {
-    key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars';
+    key: 'labels' | 'borders' | 'relief' | 'height' | 'stars';
     label: string;
     title: string;
   }[];
@@ -271,6 +277,7 @@ export function mountUi(
     section('scale', row(modeSeg.root)),
     section('playback', speedRow),
     section('palette', paletteRow),
+    section('sea', row(seaSeg.root)),
     section('layers', showRow),
   );
 
@@ -483,13 +490,18 @@ export function mountUi(
     for (const b of paletteBtns) b.el.setAttribute('aria-pressed', String(b.id === id));
   }
 
-  function setLayer(
-    key: 'labels' | 'borders' | 'ocean' | 'relief' | 'height' | 'stars',
-    on: boolean,
-  ) {
+  function setLayer(key: 'labels' | 'borders' | 'relief' | 'height' | 'stars', on: boolean) {
     globe[key] = on;
     layerBtns.find((x) => x.key === key)?.el.setAttribute('aria-pressed', String(on));
   }
+
+  /** Picking a tone also mutes the sea, and colour-mapping it leaves the last tone remembered. */
+  const setSea = (id: 'mapped' | SeaTone) => {
+    globe.ocean = id === 'mapped';
+    if (id !== 'mapped') globe.seaTone = id;
+    for (const b of seaSeg.btns) b.el.setAttribute('aria-pressed', String(b.id === id));
+    layoutSeg(seaSeg.root);
+  };
 
   const setSettingsOpen = (open: boolean) => {
     settings.dataset.open = String(open);
@@ -503,6 +515,9 @@ export function mountUi(
   }
   for (const b of modeSeg.btns) {
     b.el.addEventListener('click', () => setRelative(b.id === 'relative'));
+  }
+  for (const b of seaSeg.btns) {
+    b.el.addEventListener('click', () => setSea(b.id as 'mapped' | SeaTone));
   }
   btnGear.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -522,6 +537,7 @@ export function mountUi(
   const layoutSegs = () => {
     layoutSeg(fieldSeg.root);
     layoutSeg(modeSeg.root);
+    layoutSeg(seaSeg.root);
   };
   window.addEventListener('resize', layoutSegs);
   document.fonts?.ready.then(layoutSegs).catch(() => {});
@@ -541,7 +557,8 @@ export function mountUi(
     } else if (e.key === 'b' || e.key === 'B') {
       setLayer('borders', !globe.borders);
     } else if (e.key === 'o' || e.key === 'O') {
-      setLayer('ocean', !globe.ocean);
+      // Still an on/off key: "off" is whichever flat tone was picked last.
+      setSea(globe.ocean ? globe.seaTone : 'mapped');
     } else if (RELIEF_3D_ENABLED && (e.key === 'h' || e.key === 'H')) {
       setLayer('height', !globe.height);
     } else if (e.key === 'd' || e.key === 'D') {
@@ -705,7 +722,7 @@ export function mountUi(
     // is measured there, so it applies to the daylight gradient exactly as it does to temperature.
     tipSwatch.style.background =
       !isLand && !globe.ocean
-        ? OCEAN_MUTED_CSS
+        ? seaToneCss(globe.seaTone)
         : blendedCss(
             from,
             to,
@@ -745,6 +762,7 @@ export function mountUi(
   setRelative(globe.relative);
   setPalette(paletteById(globe.palette).id);
   for (const d of layerDefs) setLayer(d.key, globe[d.key]);
+  setSea(globe.ocean ? 'mapped' : globe.seaTone);
   setMonth(initial.month ?? dateToMonth(new Date(), months));
   requestAnimationFrame(frame);
 

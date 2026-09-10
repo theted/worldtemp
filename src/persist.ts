@@ -6,6 +6,8 @@
  * during startup would take the whole app down for a convenience feature.
  */
 
+import type { SeaTone } from './globe';
+
 const KEY = 'worldtemp.state.v1';
 
 export interface SavedState {
@@ -23,6 +25,7 @@ export interface SavedState {
   borders: boolean;
   relief: boolean;
   ocean: boolean;
+  seaTone: SeaTone;
   stars: boolean;
   height: boolean;
   field: 'temperature' | 'daylight';

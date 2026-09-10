@@ -27,12 +27,13 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 | `r` | toggle the colour scale between relative and absolute |
 | `l` | toggle country labels |
 | `b` | toggle country borders |
-| `o` | toggle ocean colouring |
+| `o` | toggle ocean colouring (off shows the flat sea tone last picked) |
 | `d` | switch between temperature and daylight |
 
 Everything configurable lives behind the cog in the top-right corner: which **field** is drawn
 (temp, the monthly climatology, or daylight, the hours between sunrise and sunset), which **scale**
-(absolute or relative), which **palette**, and which **layers**. The console along the bottom keeps
+(absolute or relative), which **palette**, how the **sea** is drawn (colour-mapped, or a flat blue
+or grey), and which **layers**. The console along the bottom keeps
 only the two things you read continuously — what the colours mean, and when — and its caption states
 the two facts the moved controls used to imply.
 
@@ -317,7 +318,7 @@ its intersection is a quadratic — O(1), exact rather than tessellated, and the
 auto-exposure sampler has used all along. That fix stands regardless of the flag.
 
 **Switching the ocean off rescales the map, not just the pixels.** With `o` the sea is muted to a
-flat ground and the land field reads on its own. Doing only that would disappoint, though: in
+flat ground — sea blue or neutral grey — and the land field reads on its own. Doing only that would disappoint, though: in
 relative mode the colour window is set by an auto-exposure histogram over everything on screen, so
 the ocean's narrow, warm range would go on owning the scale even while invisible, and the land would
 stay squeezed into the slice of ramp it had before. So the sampler drops ocean hits in this mode

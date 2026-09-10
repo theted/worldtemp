@@ -28,14 +28,25 @@ import { lonLatToVec3, vec3ToLonLat } from './geo';
  */
 
 /**
- * The flat ground the ocean falls back to when its colouring is switched off.
+ * The flat grounds the ocean can fall back to when its colouring is switched off.
  *
- * Declared here in linear 0–1 so the shader and the hover swatch cannot drift: the GLSL literal is
- * interpolated from this array, and `OCEAN_MUTED_CSS` is the same numbers for the DOM. Chosen a
- * little above the page background rather than equal to it — matching `--color-ink` exactly would
- * dissolve the sphere's dark limb into space and lose the globe's form.
+ * Declared here in 0–1 so the shader and the hover swatch cannot drift: the `uSea` uniform eases
+ * toward one of these arrays, and `seaToneCss` is the same numbers for the DOM.
+ *
+ * Both sit well clear of the page background. The first mute was a near-black a hair above
+ * `--color-ink`, and the whole sea read as a hole cut through the planet rather than as a surface.
+ * They stay dark and desaturated enough to sit behind the colour-mapped land instead of competing
+ * with it — the blue for a globe that still looks like one, the grey for a land field with no hue
+ * anywhere else to argue with.
  */
-export const OCEAN_MUTED: [number, number, number] = [0.059, 0.086, 0.118];
+export type SeaTone = 'blue' | 'grey';
+export const SEA_TONES: Record<SeaTone, [number, number, number]> = {
+  blue: [0.157, 0.282, 0.408],
+  grey: [0.384, 0.396, 0.408],
+};
+
+export const isSeaTone = (t: unknown): t is SeaTone =>
+  typeof t === 'string' && Object.keys(SEA_TONES).includes(t);
 
 /**
  * How far the tallest ground rises above the sphere, as a fraction of its radius.
@@ -65,7 +76,8 @@ export const RELIEF_3D_ENABLED = false;
 /** Segments around and over the sphere. Displacement is the only thing that needs the fine grid. */
 const SPHERE_SEGMENTS = RELIEF_3D_ENABLED ? [1024, 512] : [192, 96];
 
-export const OCEAN_MUTED_CSS = `rgb(${OCEAN_MUTED.map((c) => Math.round(c * 255)).join(' ')})`;
+export const seaToneCss = (tone: SeaTone) =>
+  `rgb(${SEA_TONES[tone].map((c) => Math.round(c * 255)).join(' ')})`;
 
 const VERTEX = /* glsl */ `
   uniform sampler2D uElev;
@@ -115,6 +127,7 @@ const FRAGMENT = /* glsl */ `
   uniform float uDither;
   uniform float uRelief;
   uniform float uOcean;
+  uniform vec3 uSea;
   uniform float uDaylight;
   uniform float uDecl;
   uniform float uRim;
@@ -228,7 +241,7 @@ const FRAGMENT = /* glsl */ `
     // Muting the sea to a flat ground is not merely cosmetic: with the ocean hidden the auto-
     // exposure histogram drops ocean samples too, so the ramp is spent entirely on the land field.
     // Applied before the shading below, so the coastline still draws over the flat water.
-    col = mix(mix(vec3(${OCEAN_MUTED.join(', ')}), col, coastMask), col, uOcean);
+    col = mix(mix(uSea, col, coastMask), col, uOcean);
 
     // The shading modulates brightness over a colour-mapped field, which the unlit rule otherwise
     // forbids, and here it is a real cost: a slope makes one temperature read as two shades. It
@@ -328,6 +341,8 @@ export interface Globe {
   relief: boolean;
   /** Whether the ocean is colour-mapped at all, or muted to a flat ground. */
   ocean: boolean;
+  /** The flat ground the sea shows while `ocean` is off. */
+  seaTone: SeaTone;
   /** Whether the surface is displaced by real elevation. */
   height: boolean;
   stars: boolean;
@@ -353,6 +368,7 @@ export interface GlobeOptions {
   borders?: boolean | undefined;
   relief?: boolean | undefined;
   ocean?: boolean | undefined;
+  seaTone?: SeaTone | undefined;
   stars?: boolean | undefined;
   height?: boolean | undefined;
   field?: FieldId | undefined;
@@ -430,6 +446,10 @@ export function createGlobe(
   let paletteFrom = paletteById(options.palette ?? DEFAULT_PALETTE_ID);
   let paletteTo = paletteFrom;
 
+  // Saved state is only as trustworthy as the build that wrote it.
+  const initialSea: SeaTone = isSeaTone(options.seaTone) ? options.seaTone : 'blue';
+  const seaTarget = new THREE.Vector3();
+
   const uniforms = {
     uField: { value: field.texture },
     uTerrain: { value: terrain.texture },
@@ -450,6 +470,7 @@ export function createGlobe(
     uDither: { value: 2 / 255 }, // full quantisation step, peak-to-peak
     uRelief: { value: options.relief === false ? 0 : 1 },
     uOcean: { value: options.ocean === false ? 0 : 1 },
+    uSea: { value: new THREE.Vector3(...SEA_TONES[initialSea]) },
     uDaylight: { value: options.field === 'daylight' ? 1 : 0 },
     uDecl: { value: 0 },
     uRim: { value: 1 },
@@ -580,6 +601,7 @@ export function createGlobe(
     borders: options.borders ?? true,
     relief: options.relief ?? true,
     ocean: options.ocean ?? true,
+    seaTone: initialSea,
     height: RELIEF_3D_ENABLED ? (options.height ?? false) : false,
     stars: options.stars ?? true,
     get window() {
@@ -651,6 +673,12 @@ export function createGlobe(
     uniforms.uDecl.value = solarDeclination(monthToDayOfYear(api.month, field.meta.months));
     uniforms.uRelief.value += ((api.relief ? 1 : 0) - uniforms.uRelief.value) * ease;
     uniforms.uOcean.value += ((api.ocean ? 1 : 0) - uniforms.uOcean.value) * ease;
+    // Blue and grey cross-fade into each other, but while the sea is still fully colour-mapped the
+    // tone is snapped instead: fading the sea out while its destination drifts would show a colour
+    // that is neither of the two on offer.
+    seaTarget.fromArray(SEA_TONES[isSeaTone(api.seaTone) ? api.seaTone : 'blue']);
+    if (uniforms.uOcean.value > 0.999) uniforms.uSea.value.copy(seaTarget);
+    else uniforms.uSea.value.lerp(seaTarget, ease);
     uniforms.uExag.value += ((api.height ? MAX_EXAGGERATION : 0) - uniforms.uExag.value) * ease;
     // The outlines have to climb with the ground, or a raised Himalaya swallows the borders across
     // it. Only while the displacement is actually moving; `setExaggeration` no-ops once settled.
