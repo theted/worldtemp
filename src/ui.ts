@@ -106,18 +106,7 @@ export function mountUi(
   );
   header.innerHTML = `
     <h1 class="text-[13px] tracking-[0.42em] text-chalk">WORLDTEMP</h1>
-    <p data-sub class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>
-    <div class="mt-5 h-px w-16 bg-edge"></div>
-    <dl class="mt-4 space-y-1.5 text-[10px] leading-relaxed text-haze/85">
-      ${meta.sources
-        .map(
-          (s) => `<div>
-            <dt class="inline text-haze/60">${s.layer}</dt>
-            <dd class="inline">&nbsp;· ${s.name} <span class="text-haze/60">${s.period}</span></dd>
-          </div>`,
-        )
-        .join('')}
-    </dl>`;
+    <p data-sub class="mt-1.5 text-[11px] tracking-[0.1em] text-haze">average monthly temperature</p>`;
   // The page names what it is showing. Leaving "average monthly temperature" over a daylight globe
   // would be the masthead telling the same lie the legend is built to never tell.
   const mastheadSub = header.querySelector('[data-sub]');
@@ -200,7 +189,10 @@ export function mountUi(
 
   const settings = el(
     'div',
-    'panel pop pointer-events-auto absolute right-0 top-full mt-2.5 w-[21rem] rounded-xl px-4 py-4',
+    // Capped to the viewport and scrolled within: with the about block at the bottom it is taller
+    // than a landscape phone, and a popover that runs off the screen hides its own last section.
+    'panel pop pointer-events-auto absolute right-0 top-full mt-2.5 w-[21rem] rounded-xl px-4 py-4 ' +
+      'max-h-[calc(100dvh-7rem)] overflow-y-auto overscroll-contain',
   );
   settings.dataset.open = 'false';
 
@@ -260,6 +252,22 @@ export function mountUi(
     return { key: d.key, el: b };
   });
 
+  // Attribution lives with the settings rather than over the globe. It is read once, if at all,
+  // and as a block of grey type in the corner it competed with the picture for the whole visit.
+  const about = el('div', 'mt-2 text-[10px] leading-relaxed text-haze/85');
+  about.innerHTML = `
+    <p>Average monthly temperature and hours of daylight, month by month through the year. All data
+    is served from the page itself; once it has loaded, nothing more is fetched.</p>
+    <dl class="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-2">
+      ${meta.sources
+        .map(
+          (s) => `<dt class="text-haze/60">${s.layer}</dt>
+            <dd>${s.name} <span class="whitespace-nowrap text-haze/60">${s.period}</span>
+              <span class="block text-haze/60">${s.quantity}</span></dd>`,
+        )
+        .join('')}
+    </dl>`;
+
   /** A titled block. Ruled off from the one above, so the groups read as groups. */
   const section = (title: string, body: HTMLElement) => {
     const wrap = el('div', 'mt-4 border-t border-edge/60 pt-4 first:mt-0 first:border-0 first:pt-0');
@@ -279,6 +287,7 @@ export function mountUi(
     section('palette', paletteRow),
     section('sea', row(seaSeg.root)),
     section('layers', showRow),
+    section('about', about),
   );
 
   // --- settings button, top right ---------------------------------------------------------------

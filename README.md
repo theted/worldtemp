@@ -33,7 +33,7 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 Everything configurable lives behind the cog in the top-right corner: which **field** is drawn
 (temp, the monthly climatology, or daylight, the hours between sunrise and sunset), which **scale**
 (absolute or relative), which **palette**, how the **sea** is drawn (colour-mapped, or a flat blue
-or grey), and which **layers**. The console along the bottom keeps
+or grey), and which **layers** — with an **about** section at the bottom naming every data source. The console along the bottom keeps
 only the two things you read continuously — what the colours mean, and when — and its caption states
 the two facts the moved controls used to imply.
 
@@ -102,7 +102,7 @@ spatial detail still comes from WorldClim 2.1; what CRU supplies is the shift on
 **Except Antarctica, which CRU-TS does not cover.** 97% of the pixels the series is missing are south
 of 60° S, and the gap cannot simply be left: the dilation pass below would fill the coldest place on
 Earth from its ocean neighbours at about −1.8 °C, and `T_MIN = −70` exists precisely because of the
-Antarctic plateau. So those pixels keep the 1970–2000 field, and the masthead names it as its own
+Antarctic plateau. So those pixels keep the 1970–2000 field, and the about section names it as its own
 tier rather than quietly averaging two periods under one label. The remaining 3% is a scatter of
 islands too small for CRU's 0.5° grid to resolve.
 
@@ -415,7 +415,7 @@ src/labels.ts           country names: project, cull, declutter, place
 src/elevation.ts        real heights, for displacement — the hillshade is a derivative, not a height
 src/cache.ts            the rasters in Cache Storage, keyed by a digest of the build that wrote them
 src/persist.ts          camera and settings in localStorage, with every access guarded
-src/ui.ts               masthead, legend, transport, tooltip
+src/ui.ts               masthead, settings and about, legend, transport, tooltip
 .github/workflows/      build and publish to S3 on every push to master
 ```
 

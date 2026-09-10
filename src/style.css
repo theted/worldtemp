@@ -80,6 +80,9 @@
   visibility: hidden;
   transform: translateY(-8px) scale(0.97);
   transform-origin: top right;
+  /* It scrolls once taller than the viewport, and the default track would be the brightest thing in it. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(219, 227, 236, 0.18) transparent;
   transition:
     opacity 150ms ease,
     transform 240ms var(--ease-ui),
@@ -422,7 +425,7 @@
  * The masthead sits directly on the globe with no panel behind it, so once you zoom in far enough
  * for a bright surface to fill the frame it loses all contrast.
  *
- * A halo alone isn't enough here: the attribution lines are deliberately a mid grey, and mid grey
+ * A halo alone isn't enough here: the subtitle is deliberately a mid grey, and mid grey
  * on mid-bright ramp colours is unreadable however it is outlined. So the text keeps a halo and
  * sits on a soft corner scrim, which restores contrast without introducing a visible panel edge or
  * brightening the type back into competing with the globe.
