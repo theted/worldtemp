@@ -10,7 +10,7 @@ import {
 } from './ramp';
 import { loadCountries, type Countries } from './countries';
 import { createLabels, type Labels } from './labels';
-import { createStars } from './stars';
+import { createStars, STARS_DEFAULT_AMOUNT } from './stars';
 import type { Terrain } from './terrain';
 import type { Elevation } from './elevation';
 import { createExposure, type TempWindow } from './exposure';
@@ -38,12 +38,25 @@ import { lonLatToVec3, vec3ToLonLat } from './geo';
  * They stay dark and desaturated enough to sit behind the colour-mapped land instead of competing
  * with it — the blue for a globe that still looks like one, the grey for a land field with no hue
  * anywhere else to argue with.
+ *
+ * Glass is the exception, on purpose: that first near-black mute was fun to look at, so it is kept
+ * as a choice and taken the rest of the way. Its tint is blended over the far hemisphere, so the
+ * continents on the back of the planet show through, mirrored, as they would through a real one.
  */
-export type SeaTone = 'blue' | 'grey';
+export type SeaTone = 'blue' | 'grey' | 'glass';
 export const SEA_TONES: Record<SeaTone, [number, number, number]> = {
   blue: [0.157, 0.282, 0.408],
   grey: [0.384, 0.396, 0.408],
+  glass: [0.09, 0.15, 0.23],
 };
+
+/**
+ * How opaque the glass sea is where it faces you. It climbs to fully opaque at the limb, which is
+ * Fresnel reflection, and the cue that makes the sphere read as glass rather than as a hole.
+ */
+const GLASS_ALPHA = 0.3;
+/** The far hemisphere through the glass, dimmed so it reads as behind the near surface. */
+const GLASS_FAR = 0.42;
 
 export const isSeaTone = (t: unknown): t is SeaTone =>
   typeof t === 'string' && Object.keys(SEA_TONES).includes(t);
@@ -128,6 +141,7 @@ const FRAGMENT = /* glsl */ `
   uniform float uRelief;
   uniform float uOcean;
   uniform vec3 uSea;
+  uniform float uGlass;
   uniform float uDaylight;
   uniform float uDecl;
   uniform float uRim;
@@ -263,14 +277,42 @@ const FRAGMENT = /* glsl */ `
     vec3 edge = mix(col + vec3(0.20), col * 0.62, step(0.5, luma));
     col = mix(col, edge, coast * 0.85 * uRelief);
 
+    // Only a muted sea can be glass, and land never is.
+    float glass = uGlass * (1.0 - uOcean);
+
+    // The far hemisphere, seen from inside through the glass: its land, dimmed, and none of its
+    // sea. three draws a blended double-sided material back faces first, so the near surface is
+    // composited over this.
+    //
+    // Told apart by FLIP_SIDED, not gl_FrontFacing. three draws that back pass by flipping the
+    // winding (gl.frontFace(CW)) rather than the culled face, so to the GPU the far hemisphere's
+    // triangles *are* front-facing, and a gl_FrontFacing test never sees a back face at all.
+  #ifdef FLIP_SIDED
+    float farAlpha = coastMask * glass;
+    if (farAlpha < 0.004) discard;
+    fragColor = vec4(col * ${GLASS_FAR}, farAlpha);
+    return;
+  #endif
+
     // Deliberately no diffuse term. Shading a colour-mapped surface would make one temperature
     // read as two different colours depending on which way it faces, quietly breaking the promise
     // the legend makes. Form comes from the silhouette, the borders, and this rim alone - and the
     // rim is confined to the very edge, where the surface is too foreshortened to read a value off.
-    float rim = 1.0 - max(dot(normalize(vNormalW), normalize(vViewDir)), 0.0);
-    col += vec3(0.20, 0.40, 0.72) * pow(rim, 3.5) * uRim;
+    float facing = max(dot(normalize(vNormalW), normalize(vViewDir)), 0.0);
 
-    fragColor = vec4(col, 1.0);
+    // The muted sea is the one surface allowed a shading term, because it is the one surface that
+    // no longer carries a value. Without it, a flat fill under a rim that brightens the edge is
+    // exactly how glass is drawn, and the sea reads as translucent however opaque its colour is. A
+    // solid body darkens toward its limb, so this does, and holds the rim back over the muted sea.
+    // Glass wants precisely the cue this removes, so glass is spared it.
+    float muted = (1.0 - coastMask) * (1.0 - uOcean) * (1.0 - uGlass);
+    col *= mix(1.0, 0.45 + 0.55 * sqrt(facing), muted);
+
+    float rim = 1.0 - facing;
+    col += vec3(0.20, 0.40, 0.72) * pow(rim, 3.5) * uRim * (1.0 - 0.75 * muted);
+
+    float seaAlpha = mix(${GLASS_ALPHA}, 1.0, pow(rim, 3.0));
+    fragColor = vec4(col, mix(1.0, mix(seaAlpha, 1.0, coastMask), glass));
   }
 `;
 
@@ -298,18 +340,15 @@ const OPENING_FILL = 0.92;
  * look like it slams on the brakes at the end however gentle the easing curve is; interpolating
  * the ratio gives a constant perceived rate, so the curve you pick is the curve you see.
  */
-const INTRO_SECONDS = 2.4;
-const INTRO_FROM = 2.9;
+const INTRO_SECONDS = 3.2;
+const INTRO_FROM = 3.6;
 
 /**
- * Ease-out with a whisper of overshoot, so the globe arrives and settles rather than stopping
- * dead against a wall. `s` is the overshoot strength; it is small on purpose, because the log
- * interpolation multiplies whatever it does here by the whole zoom range.
+ * Quintic ease-out: two thirds of the approach is covered in the first fifth of the time, and the
+ * rest is spent settling. The globe rushes in and then glides the last stretch, rather than the
+ * approach moving at one speed and stopping.
  */
-const easeOutBack = (t: number, s = 0.22) => {
-  const u = t - 1;
-  return 1 + (s + 1) * u * u * u + s * u * u;
-};
+const easeOutQuint = (t: number) => 1 - (1 - t) ** 5;
 
 /**
  * Soft zoom stops, and the spring that enforces them.
@@ -322,7 +361,14 @@ const easeOutBack = (t: number, s = 0.22) => {
 const DIST_MIN = 1.25;
 const DIST_MAX = 6;
 const SPRING_K = 190;
-const SPRING_D = 17;
+const SPRING_D = 12;
+
+/**
+ * The same band at the poles. OrbitControls stops dead a hair short of each pole, which made it the
+ * one place a drag hit a wall; now the camera may run into the last few degrees and is sprung back.
+ */
+const POLAR_SOFT = 0.12;
+const POLAR_HARD = 0.01;
 
 export interface Globe {
   /** Continuous position in the year, 0 = mid-January, wrapping at 12. */
@@ -345,7 +391,8 @@ export interface Globe {
   seaTone: SeaTone;
   /** Whether the surface is displaced by real elevation. */
   height: boolean;
-  stars: boolean;
+  /** How many stars, 0 (none) to 1 (the densest field); see `starCount`. */
+  starAmount: number;
   /** The colour window currently in force, in °C — what the legend must label. */
   readonly window: TempWindow;
   /** Eased 0→1 across a palette change, so the legend can cross-fade in step. */
@@ -369,7 +416,7 @@ export interface GlobeOptions {
   relief?: boolean | undefined;
   ocean?: boolean | undefined;
   seaTone?: SeaTone | undefined;
-  stars?: boolean | undefined;
+  starAmount?: number | undefined;
   height?: boolean | undefined;
   field?: FieldId | undefined;
 }
@@ -409,8 +456,10 @@ export function createGlobe(
   controls.enableDamping = true;
   // Lower than it was: the delta decays more slowly, so a flick keeps gliding instead of arriving
   // and stopping. Paired with the rubber band below, movement reads as momentum rather than input.
-  controls.dampingFactor = 0.048;
+  controls.dampingFactor = 0.032;
   controls.rotateSpeed = 0.42;
+  controls.minPolarAngle = POLAR_HARD;
+  controls.maxPolarAngle = Math.PI - POLAR_HARD;
   controls.enablePan = false;
   // Wider than the soft stops on purpose — this is the slack the rubber band is allowed to use.
   // OrbitControls clamps the radius inside its own update(), so anything tighter here would flatten
@@ -420,11 +469,17 @@ export function createGlobe(
   controls.zoomSpeed = 0.7;
 
   /** Distance at which the globe sits framed. The intro eases in to it; the spring defends it. */
-  let settledDist = camera.position.length() || 2.6;
+  // Clamped because a restored camera can be anywhere the old one was, including partway through
+  // an intro that was saved before it finished: the intro would then set off from that distance
+  // times INTRO_FROM, and settle outside the stops it is meant to arrive within.
+  let settledDist = THREE.MathUtils.clamp(camera.position.length() || 2.6, DIST_MIN, DIST_MAX);
   /** 0→1 across the opening move. Reaching 1 hands the distance back to the controls. */
   let intro = 0;
   /** Radial velocity carried by the rubber band, in world units per second. */
   let distVel = 0;
+  /** The same, for the polar angle, in radians per second. */
+  let polarVel = 0;
+  const orbit = new THREE.Spherical();
 
   // Touching the globe mid-intro ends it. Nothing snaps: the intro only *writes* the distance
   // while it is running, so stopping it simply leaves the camera wherever it had reached.
@@ -471,6 +526,7 @@ export function createGlobe(
     uRelief: { value: options.relief === false ? 0 : 1 },
     uOcean: { value: options.ocean === false ? 0 : 1 },
     uSea: { value: new THREE.Vector3(...SEA_TONES[initialSea]) },
+    uGlass: { value: initialSea === 'glass' ? 1 : 0 },
     uDaylight: { value: options.field === 'daylight' ? 1 : 0 },
     uDecl: { value: 0 },
     uRim: { value: 1 },
@@ -483,6 +539,9 @@ export function createGlobe(
     uniforms,
     vertexShader: VERTEX,
     fragmentShader: FRAGMENT,
+    // ShaderMaterial alone defaults this to true, which silently skips three's back-faces-first
+    // pass for blended two-sided drawing. Glass depends on that pass; opaque drawing ignores it.
+    forceSinglePass: false,
   });
 
   // 192x96 is ample for a sphere that stays a sphere. Displacement needs vertices to displace, and
@@ -603,7 +662,7 @@ export function createGlobe(
     ocean: options.ocean ?? true,
     seaTone: initialSea,
     height: RELIEF_3D_ENABLED ? (options.height ?? false) : false,
-    stars: options.stars ?? true,
+    starAmount: options.starAmount ?? STARS_DEFAULT_AMOUNT,
     get window() {
       return shown;
     },
@@ -679,18 +738,29 @@ export function createGlobe(
     seaTarget.fromArray(SEA_TONES[isSeaTone(api.seaTone) ? api.seaTone : 'blue']);
     if (uniforms.uOcean.value > 0.999) uniforms.uSea.value.copy(seaTarget);
     else uniforms.uSea.value.lerp(seaTarget, ease);
+    uniforms.uGlass.value += ((api.seaTone === 'glass' ? 1 : 0) - uniforms.uGlass.value) * ease;
+    // Blending both faces of the sphere is a second full pass over it, so the material only goes
+    // two-sided while some glass is showing, or is about to.
+    const glassy =
+      (!api.ocean && api.seaTone === 'glass') ||
+      uniforms.uGlass.value * (1 - uniforms.uOcean.value) > 0.002;
+    if (material.transparent !== glassy) {
+      material.transparent = glassy;
+      material.side = glassy ? THREE.DoubleSide : THREE.FrontSide;
+      material.needsUpdate = true;
+    }
     uniforms.uExag.value += ((api.height ? MAX_EXAGGERATION : 0) - uniforms.uExag.value) * ease;
     // The outlines have to climb with the ground, or a raised Himalaya swallows the borders across
     // it. Only while the displacement is actually moving; `setExaggeration` no-ops once settled.
     countries?.setExaggeration(uniforms.uExag.value);
-    stars.points.visible = api.stars;
+    stars.setAmount(api.starAmount);
     stars.update(elapsed);
     if (countries) countries.lines.visible = api.borders;
     controls.update();
 
     if (intro < 1) {
       intro = Math.min(1, intro + dt / INTRO_SECONDS);
-      camera.position.setLength(settledDist * INTRO_FROM ** (1 - easeOutBack(intro)));
+      camera.position.setLength(settledDist * INTRO_FROM ** (1 - easeOutQuint(intro)));
     } else {
       // Rubber band. `over` is signed, so one expression handles both stops: positive pushes the
       // camera back out of the globe, negative pulls it back in from the void.
@@ -701,6 +771,22 @@ export function createGlobe(
         camera.position.setLength(
           THREE.MathUtils.clamp(d + distVel * dt, DIST_MIN - 0.12, DIST_MAX + 0.7),
         );
+      }
+
+      // And at the poles. Unlike the distance, this turns the camera, so it has to be re-aimed.
+      orbit.setFromVector3(camera.position);
+      const lo = POLAR_SOFT;
+      const hi = Math.PI - POLAR_SOFT;
+      const overPhi = orbit.phi < lo ? lo - orbit.phi : orbit.phi > hi ? hi - orbit.phi : 0;
+      if (overPhi !== 0 || Math.abs(polarVel) > 1e-4) {
+        polarVel += (overPhi * SPRING_K - polarVel * SPRING_D) * dt;
+        orbit.phi = THREE.MathUtils.clamp(
+          orbit.phi + polarVel * dt,
+          POLAR_HARD,
+          Math.PI - POLAR_HARD,
+        );
+        camera.position.setFromSpherical(orbit);
+        camera.lookAt(controls.target);
       }
     }
 

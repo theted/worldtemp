@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 /**
- * A sparse starfield behind the globe. One draw call, ~1800 points.
+ * A sparse starfield behind the globe. One draw call, as many points as the amount control asks for.
  *
  * This sits behind a data visualisation, so the twinkle amplitude stays low and there is no motion
  * fast enough to catch the eye while you are reading the surface. Brightness is skewed toward the
@@ -49,15 +49,33 @@ const FRAGMENT = /* glsl */ `
   }
 `;
 
+/**
+ * The pool the amount control draws from. Stars are generated in random order, so any prefix of the
+ * buffer is itself a uniform scatter: showing fewer is only a shorter draw range, with no rebuild and
+ * no reshuffle, and the stars that stay are the same stars.
+ *
+ * The control is squared on its way to a count, because density is judged by area and the eye tells
+ * a few hundred stars apart far better than it does ten thousand. Half-way lands on 2600, the field
+ * this has always drawn.
+ */
+export const STAR_POOL = 10400;
+export const STARS_DEFAULT_AMOUNT = 0.5;
+
+/** Stars shown for an amount from 0 (none) to 1 (the whole pool). */
+export const starCount = (amount: number) =>
+  Math.round(STAR_POOL * Math.min(Math.max(amount, 0), 1) ** 2);
+
 export interface Stars {
   points: THREE.Points;
+  /** How many of the pool to draw, 0–1; see `starCount`. */
+  setAmount(amount: number): void;
   /** Advances the twinkle. */
   update(elapsed: number): void;
   setPixelRatio(ratio: number): void;
   dispose(): void;
 }
 
-export function createStars(count = 2600, radius = 60): Stars {
+export function createStars(count = STAR_POOL, radius = 60): Stars {
   const position = new Float32Array(count * 3);
   const color = new Float32Array(count * 3);
   const size = new Float32Array(count);
@@ -107,9 +125,13 @@ export function createStars(count = 2600, radius = 60): Stars {
     fragmentShader: FRAGMENT,
     transparent: true,
     blending: THREE.AdditiveBlending,
-    // Painted first with no depth interaction at all; the opaque globe simply covers them. This
-    // sidesteps any depth-precision question at radius 60 and keeps the ordering trivial.
-    depthTest: false,
+    // Depth-tested against the globe. They used not to be, on the idea that renderOrder paints them
+    // first -- but renderOrder only sorts *within* three's opaque and blended lists, and the opaque
+    // list always draws first. So every star in front of the globe's disc was added onto its
+    // surface: lost over bright land, and over a dark sea exactly the specks that made the planet
+    // look see-through. renderOrder still puts them first among blended things, which is what lets
+    // the glass sea show them through itself.
+    depthTest: true,
     depthWrite: false,
   });
 
@@ -119,6 +141,11 @@ export function createStars(count = 2600, radius = 60): Stars {
 
   return {
     points,
+    setAmount: (amount) => {
+      const n = starCount(amount);
+      geometry.setDrawRange(0, n);
+      points.visible = n > 0;
+    },
     update: (elapsed) => {
       uniforms.uTime.value = elapsed;
     },

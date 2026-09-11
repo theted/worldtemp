@@ -26,7 +26,8 @@ export interface SavedState {
   relief: boolean;
   ocean: boolean;
   seaTone: SeaTone;
-  stars: boolean;
+  /** 0 (no stars) to 1 (the densest field). */
+  starAmount: number;
   height: boolean;
   field: 'temperature' | 'daylight';
 }
@@ -48,6 +49,14 @@ export function loadState(): Partial<SavedState> | null {
     // future build with a wider range would drive the slider off its own track.
     if (typeof parsed.speed !== 'number' || !(parsed.speed > 0 && parsed.speed <= 8)) {
       delete parsed.speed;
+    }
+    if (
+      typeof parsed.starAmount !== 'number' ||
+      !(parsed.starAmount >= 0 && parsed.starAmount <= 1)
+    ) {
+      delete parsed.starAmount;
+      // Stars were once only on or off. A saved "off" is still a clear wish, so it carries over.
+      if ((parsed as { stars?: unknown }).stars === false) parsed.starAmount = 0;
     }
     return parsed;
   } catch {

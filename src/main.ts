@@ -46,7 +46,7 @@ function startPersisting(globe: Globe, ui: UiHandle) {
     relief: globe.relief,
     ocean: globe.ocean,
     seaTone: globe.seaTone,
-    stars: globe.stars,
+    starAmount: globe.starAmount,
     height: globe.height,
     field: globe.field,
     speed: ui.speed,
@@ -101,7 +101,7 @@ async function start() {
     relief: saved?.relief,
     ocean: saved?.ocean,
     seaTone: saved?.seaTone,
-    stars: saved?.stars,
+    starAmount: saved?.starAmount,
     height: saved?.height,
     field: saved?.field,
   });

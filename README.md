@@ -33,7 +33,8 @@ to `npm run dev`. Re-run it only to change resolution or the encoded range.
 Everything configurable lives behind the cog in the top-right corner: which **field** is drawn
 (temp, the monthly climatology, or daylight, the hours between sunrise and sunset), which **scale**
 (absolute or relative), which **palette**, how the **sea** is drawn (colour-mapped, or a flat blue
-or grey), and which **layers** — with an **about** section at the bottom naming every data source. The console along the bottom keeps
+or grey, or glass you can see the far side of the planet through), which **layers**, how many
+**stars** — with an **about** section at the bottom naming every data source. The console along the bottom keeps
 only the two things you read continuously — what the colours mean, and when — and its caption states
 the two facts the moved controls used to imply.
 
@@ -408,7 +409,7 @@ src/sun.ts              sunrise, sunset and day length, in local solar time
 src/fields.ts           the two drawable quantities, and every place they differ
 src/exposure.ts         auto-exposure: what is the hottest and coldest thing on screen right now
 src/globe.ts            scene, shader, camera framing, raycast hover
-src/stars.ts            the starfield, one draw call
+src/stars.ts            the starfield, one draw call over a pool the amount slider draws a prefix of
 src/ramp.ts             both colour ramps — single source of truth for shader and legend
 src/countries.ts        TopoJSON → border lines and label anchors, from one fetch and one parse
 src/labels.ts           country names: project, cull, declutter, place

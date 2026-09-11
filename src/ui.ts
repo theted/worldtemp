@@ -3,6 +3,7 @@ import { seaToneCss, RELIEF_3D_ENABLED, type Globe, type SeaTone } from './globe
 import { monthToDayOfYear, monthToDateLabel, dateToMonth } from './calendar';
 import { rampCss, blendedCss, zeroPosition, PALETTES, paletteById } from './ramp';
 import { formatLonLat } from './geo';
+import { starCount } from './stars';
 import { sunTimes, formatClock, formatDuration } from './sun';
 
 export { dateToMonth };
@@ -46,6 +47,9 @@ const sliderFromSpeed = (s: number) =>
 
 const SPEED_MIN = speedFromSlider(0);
 const SPEED_MAX = speedFromSlider(SPEED_STEPS);
+
+/** Slider resolution for the amount of stars. The squaring to a count happens in `stars.ts`. */
+const STAR_STEPS = 100;
 
 /**
  * How long the chrome stays up after you stop reaching for it, and how far outside the panel
@@ -185,6 +189,7 @@ export function mountUi(
     { id: 'mapped', label: 'mapped', title: 'colour-map the sea  (O)' },
     { id: 'blue', label: 'blue', title: 'flat sea blue  (O)' },
     { id: 'grey', label: 'grey', title: 'flat neutral grey  (O)' },
+    { id: 'glass', label: 'glass', title: 'see-through sea  (O)' },
   ]);
 
   const settings = el(
@@ -229,6 +234,23 @@ export function mountUi(
   );
   speedRow.append(speedWrap, speedBig);
 
+  // A slider rather than a switch: zero is still "off", and everything above it is a matter of taste.
+  const starsRow = el('div', 'mt-2 flex items-center gap-3');
+  const starsWrap = el('div', 'min-w-0 flex-1');
+  const starsInput = el('input', 'scrub scrub--mini');
+  starsInput.type = 'range';
+  starsInput.min = '0';
+  starsInput.max = String(STAR_STEPS);
+  starsInput.step = '1';
+  starsInput.title = 'how many stars';
+  starsInput.setAttribute('aria-label', 'amount of stars');
+  starsWrap.appendChild(starsInput);
+  const starsBig = el(
+    'div',
+    'w-[3.1rem] shrink-0 text-right text-[11px] leading-none tabular-nums text-chalk/90',
+  );
+  starsRow.append(starsWrap, starsBig);
+
   const showRow = el('div', 'mt-2 flex flex-wrap gap-1.5');
   // The 3-D layer is offered only when the sphere was actually built with the vertices to displace;
   // a control that cannot do anything is worse than no control.
@@ -238,10 +260,9 @@ export function mountUi(
       { key: 'borders', label: 'borders', title: 'country borders  (B)' },
       { key: 'relief', label: 'relief', title: 'shaded relief' },
       ...(RELIEF_3D_ENABLED ? [{ key: 'height', label: '3d', title: 'displace by elevation  (H)' } as const] : []),
-      { key: 'stars', label: 'stars', title: 'star field' },
     ] as const
   ).slice() as readonly {
-    key: 'labels' | 'borders' | 'relief' | 'height' | 'stars';
+    key: 'labels' | 'borders' | 'relief' | 'height';
     label: string;
     title: string;
   }[];
@@ -287,6 +308,7 @@ export function mountUi(
     section('palette', paletteRow),
     section('sea', row(seaSeg.root)),
     section('layers', showRow),
+    section('stars', starsRow),
     section('about', about),
   );
 
@@ -499,7 +521,7 @@ export function mountUi(
     for (const b of paletteBtns) b.el.setAttribute('aria-pressed', String(b.id === id));
   }
 
-  function setLayer(key: 'labels' | 'borders' | 'relief' | 'height' | 'stars', on: boolean) {
+  function setLayer(key: 'labels' | 'borders' | 'relief' | 'height', on: boolean) {
     globe[key] = on;
     layerBtns.find((x) => x.key === key)?.el.setAttribute('aria-pressed', String(on));
   }
@@ -510,6 +532,14 @@ export function mountUi(
     if (id !== 'mapped') globe.seaTone = id;
     for (const b of seaSeg.btns) b.el.setAttribute('aria-pressed', String(b.id === id));
     layoutSeg(seaSeg.root);
+  };
+
+  /** `fromSlider`, as with speed: the input already holds the value, so don't write it back. */
+  const setStars = (amount: number, fromSlider = false) => {
+    globe.starAmount = amount;
+    const n = starCount(amount);
+    starsBig.textContent = n === 0 ? 'none' : n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`;
+    if (!fromSlider) starsInput.value = String(Math.round(amount * STAR_STEPS));
   };
 
   const setSettingsOpen = (open: boolean) => {
@@ -540,6 +570,7 @@ export function mountUi(
   scrub.addEventListener('pointerdown', () => setPlaying(false));
   scrub.addEventListener('input', () => setMonth(Number(scrub.value) / STEPS_PER_MONTH));
   speedInput.addEventListener('input', readSpeedSlider);
+  starsInput.addEventListener('input', () => setStars(Number(starsInput.value) / STAR_STEPS, true));
 
   // The segmented indicators are measured from live layout, so they have to be re-measured whenever
   // that layout could have changed. Metrics-driven positioning is the price of a sliding thumb.
@@ -772,6 +803,7 @@ export function mountUi(
   setPalette(paletteById(globe.palette).id);
   for (const d of layerDefs) setLayer(d.key, globe[d.key]);
   setSea(globe.ocean ? 'mapped' : globe.seaTone);
+  setStars(globe.starAmount);
   setMonth(initial.month ?? dateToMonth(new Date(), months));
   requestAnimationFrame(frame);
 
