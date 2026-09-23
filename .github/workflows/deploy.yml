@@ -1,3 +1,8 @@
+# The three-pass sync, the cache-header policy and the CloudFront invalidation all live in
+# theted/workflows/.github/workflows/deploy-static.yml, and the reasoning behind them in the private
+# theted/infrastructure repo's static-s3.md. This repo used to carry its own copy; it is the source
+# the reusable workflow was generalised from, so nothing about the deploy changes here beyond where
+# the steps are kept.
 name: Deploy to S3
 
 on:
@@ -5,95 +10,26 @@ on:
     branches: [master]
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 # One deploy at a time. Two overlapping runs would interleave their uploads and their deletes,
-# and the loser could delete assets the winner had just published.
+# and the loser could delete assets the winner had just published. It stays in the caller because
+# deploy-static.yml declares no concurrency of its own, and a called workflow runs inside this
+# workflow's run — so this group covers it.
 concurrency:
   group: deploy-s3
   cancel-in-progress: true
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-    env:
-      DISTRIBUTION_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
+    uses: theted/workflows/.github/workflows/deploy-static.yml@master
+    with:
+      node-version: '22'
       # `npm run data` is deliberately not run here. It needs ~2 GB of raw WorldClim, NOAA and
       # Natural Earth downloads that are gitignored; the *baked* rasters under public/data are
       # committed instead, so CI only has to bundle them. Refreshing the climatology is a local
       # `npm run data` and a commit.
-      - name: Build
-        run: npm run build
-
-      # A globe with no data on it still builds, still deploys, and still renders — as a black
-      # sphere. Far better to learn that here than from the live site.
-      - name: Check the baked rasters made it into the bundle
-        run: |
-          test -f dist/data/meta.json
-          test -f dist/geo/countries-110m.json
-          months=$(ls dist/data/tavg_*.png | wc -l)
-          test "$months" -eq 12 || { echo "expected 12 monthly rasters, found $months"; exit 1; }
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # Three passes, in this order, because the two halves of the bundle want opposite cache
-      # policies *and* because the order is what keeps the site consistent while it switches.
       #
-      # New assets go up first without --delete, so for a moment both generations are live and
-      # every index.html in the world still resolves. Only once the new index.html is published
-      # does the old generation get swept.
-      - name: Upload fingerprinted assets
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-        run: |
-          aws s3 sync dist/ "s3://${S3_BUCKET}" \
-            --exclude "*" --include "assets/*" \
-            --cache-control "public, max-age=31536000, immutable"
-
-      # Everything else keeps a stable URL across builds: index.html, the manifest, the rasters.
-      #
-      # `max-age=0` on the rasters is a decision, not laziness. The app caches them itself in
-      # Cache Storage under a key derived from meta.json's digest (see src/cache.ts), so a reload
-      # already costs no download. An HTTP cache permitted to serve a stale PNG would let a *new*
-      # generation be filled with *old* pixels — precisely the failure that digest exists to make
-      # impossible. Revalidation is a 304 on a handful of bytes; staleness here is unrecoverable.
-      - name: Publish the manifest, the rasters and index.html
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-        run: |
-          aws s3 sync dist/ "s3://${S3_BUCKET}" --delete \
-            --exclude "assets/*" \
-            --cache-control "public, max-age=0, must-revalidate"
-
-      # Now that nothing points at them, drop the superseded bundles. The filters apply to the
-      # delete pass too, so this only ever touches assets/.
-      - name: Remove superseded assets
-        env:
-          S3_BUCKET: ${{ secrets.S3_BUCKET }}
-        run: |
-          aws s3 sync dist/ "s3://${S3_BUCKET}" --delete \
-            --exclude "*" --include "assets/*" \
-            --cache-control "public, max-age=31536000, immutable"
-
-      - name: Invalidate CloudFront cache
-        if: ${{ env.DISTRIBUTION_ID != '' }}
-        run: aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*"
+      # verify:bundle is the check the shared workflow cannot make: that those rasters actually
+      # reached dist/. See scripts/verify-bundle.sh.
+      build-command: npm run build && npm run verify:bundle
+      dist-dir: dist
+    secrets: inherit
