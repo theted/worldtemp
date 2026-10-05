@@ -3,31 +3,35 @@
  *
  * Three sources are composited onto one 2160x1080 equirectangular grid:
  *
- *   1. WorldClim 2.1 / CRU-TS 4.09 (1991-2020)  - 2 m air temperature, land, ~18 km
+ *   1. WorldClim 2.1 / CRU-TS 4.09 (2015-2024)  - 2 m air temperature, land, ~18 km
  *   2. WorldClim 2.1 `tavg` 10' (1970-2000)     - the same, for land tier 1 does not reach
- *   3. NOAA OISST v2 LTM (1991-2020)            - sea surface temperature, ocean only, 1 deg
+ *   3. NOAA OISST v2.1 (2015-2024)              - sea surface temperature, ocean only, 0.25 deg
  *
- * Tier 1 is not distributed as a climatology: it is a monthly *series*, so the 30 years of the
- * current WMO normal period are averaged here. That is worth the gigabyte of download because it
- * puts the land on exactly the period the ocean already uses, and because it lands on the output
- * grid natively -- 10 arcmin is 2160x1080 -- so nothing is resampled.
+ * Neither tier 1 nor tier 3 is distributed as a climatology: both are monthly *series*, so the
+ * window below is averaged here, over the same years for both. That puts land and sea on one
+ * period, and it means the period can be the most recent one the series reach rather than whatever
+ * the publishers last baked. Tier 1 also lands on the output grid natively -- 10 arcmin is
+ * 2160x1080 -- so nothing on land is resampled.
  *
  * Tier 2 exists because CRU-TS has no Antarctica. Left as a hole the dilation pass below would fill
  * the coldest place on Earth from its ocean neighbours, at about -1.8 C. Every pixel tier 1 covers
  * is also covered by tier 2, so the fallback reproduces the old land mask exactly and the build
  * asserts precisely that.
  *
- * The land and ocean masks are exact complements: measured over all 12 months, land claims 34.64%
- * of pixels and ocean the remaining 65.36%, with zero left over. A dilation pass is kept as
- * graceful degradation in case a future data revision shifts a coastline, and the script asserts
- * zero unfilled pixels before writing -- a hole would render as a hard artifact.
+ * The land and ocean masks are not quite complements: the Antarctic ice shelves are in neither, and
+ * are filled by growing the sea in over them -- see the dilation pass below. The script asserts
+ * zero unfilled pixels before writing, because a hole would render as a hard artifact.
  *
  * Downloads are cached in data/raw/ and gitignored; the derived PNGs are committed, so the app runs
  * after a clone with no network access at all.
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { mkdir, readFile, rename, writeFile, stat } from 'node:fs/promises';
+import { Readable, Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import AdmZip from 'adm-zip';
@@ -36,6 +40,7 @@ import { PNG } from 'pngjs';
 import { feature } from 'topojson-client';
 import type { GeometryObject, Topology } from 'topojson-specification';
 import type { Feature, FeatureCollection, MultiPolygon, Polygon, Position } from 'geojson';
+import { readOisstNormals } from './oisst.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RAW = path.join(ROOT, 'data/raw');
@@ -110,27 +115,40 @@ const ELEV_MAX_M = 9000;
  *
  * A symmetric -50..50 clipped the Antarctic plateau (whose July means reach about -68 C) and wasted
  * the top tenth of the scale, since nowhere on Earth has a monthly mean near +50 C. These bounds
- * bracket the observed -68.5..39.6 with a little headroom, so nothing is clamped and the full ramp
+ * bracket the observed -68.5..40.2 with a little headroom, so nothing is clamped and the full ramp
  * is used. The build asserts this rather than trusting it -- see the range check below.
+ *
+ * The top was +40 until the window moved to 2015-2024, and the check is what caught it: a decade
+ * of recent Julys put the hottest monthly mean on Earth at 40.2.
  */
 const T_MIN = -70;
-const T_MAX = 40;
+const T_MAX = 42;
 
-/** OPeNDAP writes -9.96921e36 for absent cells; anything this large in magnitude is a sentinel. */
+/** NetCDF writes -9.96921e36 for absent cells; anything this large in magnitude is a sentinel. */
 const SENTINEL = 1e30;
 const isMissing = (v: number) => !Number.isFinite(v) || Math.abs(v) > SENTINEL;
 
 /**
- * The normal period to average tier 1 over.
+ * The years averaged into the land (tier 1) and ocean (tier 3) normals, inclusive.
  *
- * 1991-2020 is the current WMO 30-year normal -- and, not by accident, the period the OISST
- * long-term mean already uses, so the two halves of the globe finally describe the same decades.
+ * The latest ten years the land series reaches, rather than the 1991-2020 WMO normal. A 30-year
+ * normal is centred 15 years before it ends, and in a warming climate that is a measurable error:
+ * moving from 1970-2000 to 1991-2020 shifted the land by +0.61 C, Arctic land by nearly a degree,
+ * and 1991-2020 is centred on 2005. A decade centred on 2020 describes the present far better --
+ * moving to it shifted the land by a further +0.44 C, and Arctic land by +0.66.
+ *
+ * The cost is that ten years average away less weather than thirty -- one strong El Nino carries
+ * three times the weight. That is the trade being made, deliberately; it is a two-line change to
+ * undo, and both series reach back far enough for any window from 1982 on.
  */
-const CLIM_FROM = 1991;
-const CLIM_TO = 2020;
+const CLIM_FROM = 2015;
+const CLIM_TO = 2024;
 
-/** The archives are published per decade; 2020 alone is why the last one is needed. */
-const DECADES = ['1990-1999', '2000-2009', '2010-2019', '2020-2024'] as const;
+/** The land archives are published per decade; only those overlapping the window are fetched. */
+const DECADES = [
+  '1950-1959', '1960-1969', '1970-1979', '1980-1989',
+  '1990-1999', '2000-2009', '2010-2019', '2020-2024',
+] as const;
 
 /**
  * CRU-TS publishes daily extremes rather than a mean, so tavg is (tmin + tmax) / 2 -- which is how
@@ -147,9 +165,12 @@ const SOURCES = {
     url: 'https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_10m_tavg.zip',
     file: 'wc2.1_10m_tavg.zip',
   },
+  // The whole monthly series, 2.2 GB. PSL's OPeNDAP server could subset it, and the old long-term
+  // mean came from there, but it was down for maintenance when this moved; a plain file on their
+  // download server is the sturdier dependency, and it is only fetched once.
   sst: {
-    url: 'https://psl.noaa.gov/thredds/dodsC/Datasets/noaa.oisst.v2/sst.ltm.1991-2020.nc.ascii?sst',
-    file: 'sst.ltm.ascii',
+    url: 'https://downloads.psl.noaa.gov/Datasets/noaa.oisst.v2.highres/sst.mon.mean.nc',
+    file: 'sst.mon.mean.nc',
   },
   borders: {
     url: 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json',
@@ -184,9 +205,11 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 /**
  * Ensures `dest` exists, fetching it if not, and returns the path rather than the bytes.
  *
- * Split out from `download` for the historical archives: eight of them come to about a gigabyte,
- * and holding all eight resident just to hand them to a reader would be a gigabyte of memory for no
- * reason. The reader opens them one at a time and lets each go.
+ * Split out from `download` for the large files -- the land archives and the 2.2 GB ocean series --
+ * which their readers open from disk one at a time rather than holding resident.
+ *
+ * Streamed to a scratch name and renamed into place only once complete, so the download is never
+ * held in memory and an interrupted one can never be mistaken for a cached one.
  */
 async function ensure(url: string, dest: string): Promise<string> {
   try {
@@ -198,12 +221,23 @@ async function ensure(url: string, dest: string): Promise<string> {
   } catch {
     /* not cached yet */
   }
-  console.log(`  fetch   ${path.basename(dest)} ...`);
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
-  const buf = Buffer.from(await res.arrayBuffer());
-  await writeFile(dest, buf);
-  console.log(`          -> ${mb(buf.length)}`);
+  if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText} for ${url}`);
+  const name = path.basename(dest);
+  const total = Number(res.headers.get('content-length')) || 0;
+  let got = 0;
+  const progress = new Transform({
+    transform: (chunk: Buffer, _enc, done) => {
+      got += chunk.length;
+      process.stdout.write(`  fetch   ${name} ${mb(got)}${total ? ` / ${mb(total)}` : ''}   \r`);
+      done(null, chunk);
+    },
+  });
+  const part = `${dest}.part`;
+  const body = Readable.fromWeb(res.body as WebReadableStream);
+  await pipeline(body, progress, createWriteStream(part));
+  await rename(part, dest);
+  console.log(`  fetch   ${name} -> ${mb(got)}                    `);
   return dest;
 }
 
@@ -214,41 +248,6 @@ async function download(url: string, dest: string): Promise<Buffer> {
 // ---------------------------------------------------------------------------------------------
 // parsing
 // ---------------------------------------------------------------------------------------------
-
-/**
- * Reads an OPeNDAP `.ascii` 3-D grid into a flat array indexed [t][j][i].
- *
- * The body is one line per (time, latitude) row, prefixed `[t][j], ` and followed by `ni` comma
- * separated values. The file also appends the coordinate MAPS (time/lat/lon) after the grid; those
- * are 1-D and don't match the row prefix, so filtering on it skips them. Every expected row must
- * appear, which is what catches a truncated download.
- */
-function parseOpendapGrid(text: string, nt: number, nj: number, ni: number): Float32Array {
-  const out = new Float32Array(nt * nj * ni);
-  const seen = new Uint8Array(nt * nj);
-  const rowRe = /^\[(\d+)\]\[(\d+)\],\s*(.*)$/;
-
-  for (const line of text.split('\n')) {
-    const m = rowRe.exec(line);
-    if (!m) continue;
-    const t = Number(m[1]);
-    const j = Number(m[2]);
-    if (t >= nt || j >= nj) continue;
-    const vals = m[3]!.split(',');
-    if (vals.length !== ni) {
-      throw new Error(`row [${t}][${j}]: ${vals.length} values, expected ${ni}`);
-    }
-    const base = (t * nj + j) * ni;
-    for (let i = 0; i < ni; i++) out[base + i] = Number(vals[i]);
-    seen[t * nj + j] = 1;
-  }
-
-  const absent = seen.reduce<number>((a, b) => a + (b ? 0 : 1), 0);
-  if (absent > 0) {
-    throw new Error(`OPeNDAP grid incomplete: ${absent}/${nt * nj} rows absent (bad download?)`);
-  }
-  return out;
-}
 
 /** One GeoTIFF out of an archive, as a flat raster, verifying the grid matches our output. */
 async function readEntry(zip: AdmZip, name: string): Promise<{ raster: Float32Array; nodata: number | null }> {
@@ -281,7 +280,7 @@ async function readWorldClim(zipBuf: Buffer): Promise<{ months: Float32Array[]; 
   return { months, nodata };
 }
 
-/** The years of a `YYYY-YYYY` decade archive that fall inside the normal period. */
+/** The years of a `YYYY-YYYY` decade archive that fall inside the window. */
 function yearsIn(decade: string): number[] {
   const [d0, d1] = decade.split('-').map(Number) as [number, number];
   const years: number[] = [];
@@ -290,9 +289,9 @@ function yearsIn(decade: string): number[] {
 }
 
 /**
- * Averages the downscaled CRU-TS monthly series into 1991-2020 monthly normals.
+ * Averages the downscaled CRU-TS monthly series into monthly normals over the window.
  *
- * 720 rasters go in -- 30 years x 12 months x {tmin, tmax} -- and 12 come out. Both variables
+ * 240 rasters go in -- 10 years x 12 months x {tmin, tmax} -- and 12 come out. Both variables
  * accumulate into the *same* sum, which is what makes the result (mean tmin + mean tmax) / 2
  * without a second pass; it is only valid while every contributing pixel has both, so the count is
  * carried per pixel and asserted at the end rather than assumed.
@@ -693,9 +692,8 @@ async function main() {
   await mkdir(GEO, { recursive: true });
 
   console.log('\nsources');
-  const [wcBuf, sstTxt] = await Promise.all([
+  const [wcBuf] = await Promise.all([
     download(SOURCES.worldclim.url, path.join(RAW, SOURCES.worldclim.file)),
-    download(SOURCES.sst.url, path.join(RAW, SOURCES.sst.file)).then((b) => b.toString('utf8')),
     // written straight into public/geo for the border overlay
     download(SOURCES.borders.url, path.join(GEO, SOURCES.borders.file)),
   ]);
@@ -703,9 +701,10 @@ async function main() {
   const reliefBuf = await download(SOURCES.relief.url, path.join(RAW, SOURCES.relief.file));
   const landBuf = await download(SOURCES.land.url, path.join(RAW, SOURCES.land.file));
   const elevBuf = await download(SOURCES.elevation.url, path.join(RAW, SOURCES.elevation.file));
+  const sstPath = await ensure(SOURCES.sst.url, path.join(RAW, SOURCES.sst.file));
 
-  // Sequential, and to disk rather than to memory: this is about a gigabyte across eight archives,
-  // and fetching them concurrently would hold every response buffer at once to save wall time on a
+  // Sequential, and to disk rather than to memory: this is 400 MB across four archives, and
+  // fetching them concurrently would hold every response buffer at once to save wall time on a
   // step that only ever runs once.
   const histPaths = new Map<string, string>();
   for (const v of HIST_VARS) {
@@ -721,12 +720,9 @@ async function main() {
   console.log(`  worldclim  12 x ${W}x${H}  nodata=${nodata}`);
   const normals = await readNormals(histPaths);
 
-  // OISST: lon centres 0.5..359.5 measured eastward, lat centres 89.5..-89.5 north to south.
-  // Latitude already runs the same direction as image rows; longitude does not, hence the shift.
-  const SST_NI = 360;
-  const SST_NJ = 180;
-  const sst = parseOpendapGrid(sstTxt, MONTHS, SST_NJ, SST_NI);
-  console.log(`  oisst      12 x ${SST_NI}x${SST_NJ}`);
+  // OISST: lon centres 0.125..359.875 measured eastward, lat centres -89.875..89.875 south to
+  // north. Neither runs the way image rows and columns do, so the composite maps pixels onto it.
+  const sst = await readOisstNormals(sstPath, CLIM_FROM, CLIM_TO);
 
   console.log('\nterrain');
   const relief = await readRelief(reliefBuf);
@@ -820,27 +816,29 @@ async function main() {
   }
 
   console.log('\ncomposite');
-  const tally = { land: 0, fallback: 0, ocean: 0, dilated: 0, baseLand: 0 };
+  const tally = { land: 0, fallback: 0, ocean: 0, grownSea: 0, grownLand: 0, baseLand: 0 };
   const fields: { temp: Float32Array; land: Uint8Array }[] = [];
   let globalMin = Infinity;
   let globalMax = -Infinity;
 
   for (let m = 0; m < MONTHS; m++) {
     const wcM = wc[m]!;
+    const sstM = sst.months[m]!;
     const temp = new Float32Array(W * H);
     const land = new Uint8Array(W * H);
     const filled = new Uint8Array(W * H);
 
     for (let y = 0; y < H; y++) {
       const lat = 90 - ((y + 0.5) * 180) / H;
-      const sstFy = 89.5 - lat; // OISST row centres are 1 deg apart starting at 89.5
+      const sstFy = (lat - sst.lat0) / sst.step;
 
       for (let x = 0; x < W; x++) {
         const idx = y * W + x;
         const lon = -180 + ((x + 0.5) * 360) / W;
         const lonE = ((lon % 360) + 360) % 360; // OISST indexes eastward from 0
+        const sstFx = (lonE - sst.lon0) / sst.step;
 
-        // land, 1991-2020 where the downscaled CRU series reaches
+        // land, over the window, where the downscaled CRU series reaches
         const vNew = normals[m]![idx]!;
         const vOld = wcM[idx]!;
         const haveOld = !isMissing(vOld) && vOld !== nodata;
@@ -863,13 +861,7 @@ async function main() {
         }
 
         // ocean
-        const s = bilinear(
-          (j, i) => sst[(m * SST_NJ + j) * SST_NI + i]!,
-          SST_NI,
-          SST_NJ,
-          lonE - 0.5,
-          sstFy,
-        );
+        const s = bilinear((j, i) => sstM[j * sst.ni + i]!, sst.ni, sst.nj, sstFx, sstFy);
         if (Number.isFinite(s)) {
           temp[idx] = s;
           land[idx] = 0;
@@ -879,50 +871,66 @@ async function main() {
       }
     }
 
-    // Graceful degradation: if a future data revision moves a coastline, grow the field into the
-    // gap from its neighbours. Averaging already-filled neighbours is continuous by construction,
-    // so a healed fringe shows no seam. Currently a no-op -- the two masks tile the globe exactly.
-    for (let pass = 0; pass < 12; pass++) {
-      const todo: number[] = [];
+    // Water neither layer measures, filled from whatever surrounds it. Almost all of it is
+    // Antarctic ice shelf -- Filchner-Ronne alone is 11 thousand pixels -- which CRU-TS and
+    // WorldClim leave out as not being land, and OISST v2.1's quarter-degree mask leaves out as not
+    // being open sea. The 1-degree v2 grid was too coarse to tell, and so drew them as sea at the
+    // -1.8 C of water under ice; growing the sea inward reproduces exactly that.
+    //
+    // Each gap is grown from one layer only, which is the point. Averaging both would invent a
+    // gradient from -1.8 to -30 that is neither sea surface nor air, under a readout claiming it
+    // was one of them. So the sea goes first, and only the pockets it cannot reach -- lakes and
+    // estuaries the land layer happens to omit, Maracaibo the largest at 22 pixels -- are then
+    // grown from the land around them, and reported as land. Averaging already-filled neighbours
+    // is continuous by construction, so neither shows a seam, and passes run until the front
+    // stalls rather than to a fixed count, since a shelf hundreds of kilometres deep is that many
+    // pixels from open water.
+    const grow = (from: 0 | 255) => {
+      let todo: number[] = [];
       for (let i = 0; i < filled.length; i++) if (!filled[i]) todo.push(i);
-      if (todo.length === 0) break;
-
-      const grownTemp = new Float32Array(todo.length);
-      const grownOk = new Uint8Array(todo.length);
-      for (let k = 0; k < todo.length; k++) {
-        const idx = todo[k]!;
-        const y = (idx / W) | 0;
-        const x = idx % W;
-        let sum = 0;
-        let n = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          const yy = y + dy;
-          if (yy < 0 || yy >= H) continue;
-          for (let dx = -1; dx <= 1; dx++) {
-            const nIdx = yy * W + ((((x + dx) % W) + W) % W);
-            if (filled[nIdx]) {
-              sum += temp[nIdx]!;
-              n++;
+      let grown = 0;
+      while (todo.length > 0) {
+        const grownTemp = new Float32Array(todo.length);
+        const grownOk = new Uint8Array(todo.length);
+        for (let k = 0; k < todo.length; k++) {
+          const idx = todo[k]!;
+          const y = (idx / W) | 0;
+          const x = idx % W;
+          let sum = 0;
+          let n = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nIdx = yy * W + ((((x + dx) % W) + W) % W);
+              if (filled[nIdx] && land[nIdx] === from) {
+                sum += temp[nIdx]!;
+                n++;
+              }
             }
           }
+          if (n > 0) {
+            grownTemp[k] = sum / n;
+            grownOk[k] = 1;
+          }
         }
-        if (n > 0) {
-          grownTemp[k] = sum / n;
-          grownOk[k] = 1;
-        }
+        // Applied only after the whole pass is computed, so a pixel filled this pass does not feed
+        // a neighbour in the same one and the front advances evenly in every direction.
+        todo.forEach((idx, k) => {
+          if (!grownOk[k]) return;
+          temp[idx] = grownTemp[k]!;
+          land[idx] = from;
+          filled[idx] = 1;
+          grown++;
+        });
+        const left = todo.filter((_, k) => !grownOk[k]);
+        if (left.length === todo.length) break;
+        todo = left;
       }
-      let grew = 0;
-      for (let k = 0; k < todo.length; k++) {
-        if (!grownOk[k]) continue;
-        const idx = todo[k]!;
-        temp[idx] = grownTemp[k]!;
-        land[idx] = 0;
-        filled[idx] = 1;
-        grew++;
-        tally.dilated++;
-      }
-      if (grew === 0) break;
-    }
+      return grown;
+    };
+    tally.grownSea += grow(0);
+    tally.grownLand += grow(255);
 
     let holes = 0;
     for (let i = 0; i < filled.length; i++) if (!filled[i]) holes++;
@@ -941,7 +949,8 @@ async function main() {
   const pct = (n: number) => `${((100 * n) / total).toFixed(2)}%`;
   console.log(
     `  tiers: cruts ${pct(tally.land)}  wc2.1 ${pct(tally.fallback)}  ` +
-      `oisst ${pct(tally.ocean)}  dilated ${tally.dilated} px`,
+      `oisst ${pct(tally.ocean)}  ` +
+      `grown from sea ${tally.grownSea / MONTHS} px, from land ${tally.grownLand / MONTHS} px`,
   );
   // The whole point of the fallback is that the land mask does not move: every pixel the 1970-2000
   // climatology called land is still land, just possibly from the other tier. If this ever fails,
@@ -966,10 +975,10 @@ async function main() {
   // -------------------------------------------------------------------------------------------
   // encode
   //
-  // R = temperature, quantised to 8 bits across [-50, 50]. Deliberately NOT a 16-bit value split
-  // across two channels: the GPU bilinear-filters this texture, and interpolating a high byte
+  // R = temperature, quantised to 8 bits across [T_MIN, T_MAX]. Deliberately NOT a 16-bit value
+  // split across two channels: the GPU bilinear-filters this texture, and interpolating a high byte
   // across a step boundary produces garbage colours. One 8-bit channel filters correctly. The cost
-  // is 0.39 degC of quantisation, invisible in a heat map.
+  // is 0.44 degC of quantisation, invisible in a heat map.
   // G = land mask, so the shader and the hover readout can tell air temp from sea surface temp.
   // -------------------------------------------------------------------------------------------
   console.log('\nencode');
@@ -994,6 +1003,7 @@ async function main() {
   }
   console.log(`  12 PNGs, ${mb(bytes)} total                    `);
 
+  const period = `${CLIM_FROM}–${CLIM_TO}`;
   const meta = {
     width: W,
     height: H,
@@ -1011,7 +1021,7 @@ async function main() {
       {
         layer: 'land',
         name: 'WorldClim 2.1 / CRU-TS 4.09',
-        period: '1991–2020',
+        period,
         quantity: '2 m air temperature',
       },
       {
@@ -1022,8 +1032,8 @@ async function main() {
       },
       {
         layer: 'ocean',
-        name: 'NOAA OISST v2 long-term mean',
-        period: '1991–2020',
+        name: 'NOAA OISST v2.1',
+        period,
         quantity: 'sea surface temperature',
       },
       {

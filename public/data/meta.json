@@ -15,13 +15,13 @@
     "peakMetres": 6258.66
   },
   "tMin": -70,
-  "tMax": 40,
+  "tMax": 42,
   "encoding": "R = (T - tMin) / (tMax - tMin) * 255; G = land mask (255 land / 0 water)",
-  "version": "02e61282ae7d5179",
-  "quantisationC": 0.43,
+  "version": "6c72a35e6ae01176",
+  "quantisationC": 0.44,
   "observed": {
     "min": -68.46,
-    "max": 39.81
+    "max": 40.24
   },
   "monthLabels": [
     "Jan",
@@ -41,7 +41,7 @@
     {
       "layer": "land",
       "name": "WorldClim 2.1 / CRU-TS 4.09",
-      "period": "1991–2020",
+      "period": "2015–2024",
       "quantity": "2 m air temperature"
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "layer": "ocean",
-      "name": "NOAA OISST v2 long-term mean",
-      "period": "1991–2020",
+      "name": "NOAA OISST v2.1",
+      "period": "2015–2024",
       "quantity": "sea surface temperature"
     },
     {

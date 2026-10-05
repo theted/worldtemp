@@ -7,12 +7,14 @@ Everything is served from disk. Once the page has loaded there are no network re
 
 ```bash
 npm install
-npm run data     # one-off: downloads sources and bakes 12 PNGs (~46 MB down, a minute or so)
+npm run data     # one-off: downloads sources and bakes 12 PNGs (~3.2 GB down, a few minutes)
 npm run dev
 ```
 
 `npm run data` only needs running once — its output is committed, so a fresh clone can go straight
-to `npm run dev`. Re-run it only to change resolution or the encoded range.
+to `npm run dev`. Re-run it only to change resolution, the encoded range, or the years averaged
+(`CLIM_FROM`/`CLIM_TO` in `scripts/build-data.ts`). Downloads are cached in `data/raw/`, so a re-run
+fetches nothing it already has.
 
 ## Controls
 
@@ -61,9 +63,9 @@ field toward the September one, and the readout says so.
 
 | Layer | Source | Grid | Period | Quantity |
 |---|---|---|---|---|
-| Land | [WorldClim 2.1 / CRU-TS 4.09](https://www.worldclim.org/data/monthlywth.html) 10′, averaged here | 2160 × 1080 | 1991–2020 | 2 m air temperature |
+| Land | [WorldClim 2.1 / CRU-TS 4.09](https://www.worldclim.org/data/monthlywth.html) 10′, averaged here | 2160 × 1080 | 2015–2024 | 2 m air temperature |
 | Antarctica | [WorldClim 2.1](https://www.worldclim.org/data/worldclim21.html) `tavg` 10′ | 2160 × 1080 | 1970–2000 | 2 m air temperature |
-| Ocean | [NOAA OISST v2](https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.html) long-term mean | 360 × 180 | 1991–2020 | sea surface temperature |
+| Ocean | [NOAA OISST v2.1](https://psl.noaa.gov/data/gridded/data.noaa.oisst.v2.highres.html) monthly means, averaged here | 1440 × 720 | 2015–2024 | sea surface temperature |
 | Relief | [Natural Earth shaded relief](https://www.naturalearthdata.com/downloads/10m-shaded-relief/10m-shaded-relief-basic/) 1:10m, from SRTM Plus | 10800 × 5400 | — | hillshade |
 | Coastline | [Natural Earth land](https://github.com/topojson/world-atlas) 1:10m, rasterised here | 10800 × 5400 | — | land coverage |
 
@@ -85,20 +87,39 @@ and Pacific are water, the Sahara is land and open ocean is flat, because file s
 > Fick, S.E. and R.J. Hijmans, 2017. *WorldClim 2: new 1km spatial resolution climate surfaces for
 > global land areas.* International Journal of Climatology 37 (12): 4302–4315.
 >
+>
+> Huang, B., C. Liu, V. Banzon, E. Freeman, G. Graham, B. Hankins, T. Smith and H.-M. Zhang, 2021.
+> *Improvements of the Daily Optimum Interpolation Sea Surface Temperature (DOISST) Version 2.1.*
+> Journal of Climate 34 (8): 2923–2939.
+>
 > OISST data provided by NOAA PSL, Boulder, Colorado, USA, from https://psl.noaa.gov
 
 **The globe blends two different measurements.** Weather-station climatology only exists over land;
 the oceans are sea surface temperature from a different instrument. This is what makes the whole
 sphere legible instead of half-grey, but it means a coastline is a genuine discontinuity in *what is
 being measured*, not just in value. The hover readout always says which of the two you are looking
-at. The two masks tile the globe exactly — 34.64% land, 65.36% ocean, nothing left over.
+at. The two masks very nearly tile the globe — 34.64% land, 64.87% ocean — and the 0.5% in neither
+is water, mostly Antarctic ice shelf, filled as described under *The ice shelves* below.
 
-**Land and ocean are on the same 30 years.** They were not always: the land layer used to be
-WorldClim 2.1's 1970–2000 climatology against an ocean of 1991–2020, so the two halves of the sphere
-described different decades. WorldClim publishes no newer *climatology*, but it does publish a
-monthly *series* — CRU-TS 4.09 downscaled and bias-corrected against WorldClim 2.1, from 1950 to
-2024 — so `npm run data` now averages the 30 years of the current WMO normal period itself. The
-spatial detail still comes from WorldClim 2.1; what CRU supplies is the shift onto a recent period.
+**Land and ocean are on the same ten years, and they are the latest ten.** Neither half of the
+globe is downloaded as a climatology. WorldClim publishes a monthly *series* — CRU-TS 4.09
+downscaled and bias-corrected against WorldClim 2.1, 1950 to 2024 — and NOAA publishes OISST v2.1 as
+monthly means from 1981 to last month, so `npm run data` averages both over the same window itself.
+The spatial detail on land still comes from WorldClim 2.1; what CRU supplies is the shift onto
+recent years.
+
+The window is 2015–2024, the most recent ten years the land series reaches, rather than the WMO's
+1991–2020 normal. A 30-year normal is centred fifteen years before it ends, and in a warming climate
+that is not a rounding error: 1991–2020 is centred on 2005, and the previous move of the same
+twenty years, from 1970–2000, shifted the land by +0.61 °C. A decade centred on 2020 is the present
+within a few years. What it gives up is averaging: ten years leave more weather in the mean than
+thirty, so a single strong El Niño, or one very warm Siberian winter, carries three times the
+weight. That is a deliberate trade, and two constants in `scripts/build-data.ts` undo it.
+
+The ocean also moved product, not just period. The 1° OISST v2 the globe used to draw stopped in
+2020 when its inputs were discontinued; v2.1, its replacement, is the 0.25° daily analysis, whose
+monthly means come as one 2.2 GB file read with [h5wasm](https://github.com/usnistgov/h5wasm). The
+sea grid is four times finer on each axis for it.
 
 **Except Antarctica, which CRU-TS does not cover.** 97% of the pixels the series is missing are south
 of 60° S, and the gap cannot simply be left: the dilation pass below would fill the coldest place on
@@ -106,6 +127,15 @@ Earth from its ocean neighbours at about −1.8 °C, and `T_MIN = −70` exists 
 Antarctic plateau. So those pixels keep the 1970–2000 field, and the about section names it as its own
 tier rather than quietly averaging two periods under one label. The remaining 3% is a scatter of
 islands too small for CRU's 0.5° grid to resolve.
+
+**The ice shelves are in neither layer.** Floating ice is not land to WorldClim, and not open sea to
+OISST v2.1's quarter-degree mask, so Filchner–Ronne, Amery and the rest — about eleven thousand
+pixels — have no value at all. The old 1° grid was too coarse to leave them out, and drew them as
+sea at the −1.8 °C of water under ice. The build reproduces that by growing the sea in over the gap,
+pass by pass, from sea neighbours only: averaging in the land as well would invent a gradient from
+−1.8 to −30 °C that is neither sea surface nor air, under a readout claiming it was one of them. The
+147 pixels the sea cannot reach are lakes and estuaries the land layer happens to omit, Lake
+Maracaibo the largest, and those are grown from the land around them instead and reported as land.
 
 This is safe because the newer series is a strict *subset* of the old one — every pixel it covers,
 WorldClim 2.1 covers too — so the fallback reproduces the old land mask exactly. The build asserts
@@ -127,13 +157,15 @@ into January. That single `mix` is what makes the slider glide rather than step.
 
 **Temperature is one 8-bit channel, on purpose.** The GPU bilinear-filters this texture. A 16-bit
 value split across two channels filters *incorrectly* — interpolating a high byte across a step
-boundary produces garbage. One 8-bit channel filters correctly, at the cost of 0.43 °C of
+boundary produces garbage. One 8-bit channel filters correctly, at the cost of 0.44 °C of
 quantisation, which is invisible in a heat map. The green channel carries the land mask.
 
-**The encoded range is chosen to contain the data, not to look tidy.** −70…+40 °C brackets the
-observed −68.5…+39.6. A symmetric −50…+50 looks neater and was wrong twice over: it clipped the
+**The encoded range is chosen to contain the data, not to look tidy.** −70…+42 °C brackets the
+observed −68.5…+40.2. A symmetric −50…+50 looks neater and was wrong twice over: it clipped the
 Antarctic plateau flat, and wasted the top tenth of every ramp on temperatures the Earth does not
-have. The build asserts the bounds hold rather than clamping silently.
+have. The build asserts the bounds hold rather than clamping silently — which has already paid for
+itself once: moving to 2015–2024 put July in Khuzestan, at the head of the Persian Gulf, at 40.2 °C,
+the build refused it, and the top went from +40 to +42.
 
 **The field is unlit.** No diffuse term touches the data. Shading a colour-mapped surface would make
 one temperature read as two different colours depending on which way it faces, quietly breaking the
@@ -196,7 +228,7 @@ choice for a window that floats with the view — otherwise a 30 °C Sahara rend
 for being the coolest thing in frame. Thermal is diverging; magma, viridis and mono are sequential.
 
 **Diverging ramps stay pinned to freezing.** Naively, white sits at the midpoint of whatever range
-is in force, which is 0 °C only by coincidence — and never, now that the encoding runs −70…+40. So
+is in force, which is 0 °C only by coincidence — and never, now that the encoding runs −70…+42. So
 the shader stretches each half of a diverging ramp independently about the position of 0 °C in the
 current window (`zeroSplit`). White lands on freezing whatever the window, and when the window
 doesn't straddle zero at all it degrades to a single half of the ramp, which is the right picture
@@ -360,7 +392,7 @@ the sunrise under the cursor is always the sunrise for the date printed beside t
 
 ## Caveats
 
-- **Readings are quantised to 0.43 °C**, so the tooltip's decimal is finer than the stored value.
+- **Readings are quantised to 0.44 °C**, so the tooltip's decimal is finer than the stored value.
   Invisible at full range, but stretching a narrow relative window over the whole ramp would expose
   it as terracing, so the shader dithers by a full quantisation step using interleaved gradient
   noise. Half a step only roughens the boundary between two plateaus; a full step makes their noise
@@ -377,10 +409,18 @@ the sunrise under the cursor is always the sunrise for the date printed beside t
   than 8 °C are almost all winter values on small islands in the Canadian Arctic Archipelago, where
   CRU's 0.5° interpolation has very little station data to work from — reported here rather than
   smoothed away.
-- **This is climatology, not weather** — a 30-year average for each month, not any particular year.
+- **It moved again, by +0.44 °C, going from 1991–2020 to 2015–2024** — area-weighted over land
+  outside Antarctica, which stays where it was. The Arctic gradient is still there: +0.66 °C over
+  land north of 60° N and +0.64 °C at 30–60° N, against +0.26 °C in the tropics. 83% of land pixels
+  changed by under 1 °C. The 0.2% of land pixel-months that moved more than 3 °C are almost all
+  Siberian Arctic winters, the Taymyr in February above all, where one year differs most from the
+  next and ten years average that away least. The ocean moved by +0.19 °C, but that figure mixes
+  the change of period with the change of product, v2 to v2.1, so it is not a clean climate signal.
+- **This is climatology, not weather** — a ten-year average for each month, not any particular year.
 - **Lakes follow Natural Earth's land layer.** The Great Lakes and the Caspian are inside it, so
   they draw as land — which happens to be what the climate field says too, since WorldClim covers
-  both and OISST covers neither. The alternative would have the readout announce `land · 2 m air`
+  both and the land tiers take precedence over the ocean. OISST v2.1, unlike v2, has values there
+  too, but they are never used. The alternative would have the readout announce `land · 2 m air`
   over a pixel drawn and muted as sea.
 - **The drawn coastline and the reported measurement disagree by up to a cell.** The shoreline is
   now 2-arcmin and the temperature mask is still 10-arcmin, so within roughly 9 km of a coast the

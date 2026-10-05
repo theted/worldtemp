@@ -23,6 +23,7 @@
     "@types/topojson-client": "^3.1.5",
     "adm-zip": "^0.6.0",
     "geotiff": "^3.0.5",
+    "h5wasm": "^0.10.3",
     "pngjs": "^7.0.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.13",
