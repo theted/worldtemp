@@ -10,5 +10,9 @@
   <body class="h-full overflow-hidden bg-[#07090d]">
     <div id="app" class="relative h-full w-full"></div>
     <script type="module" src="/src/main.ts"></script>
+    <!-- Visit counter: daily totals only, no cookies or stored IPs (theted/tracking-pixel). Counted
+         only when loaded from world.sundbergsolutions.se, so the dev server is ignored. -->
+    <script>new Image().src='https://visits.sundbergsolutions.se/v.gif?s=world&r='+encodeURIComponent(document.referrer)</script>
+    <noscript><img src="https://visits.sundbergsolutions.se/v.gif?s=world" alt="" width="1" height="1" style="position:absolute"></noscript>
   </body>
 </html>
